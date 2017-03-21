@@ -139,5 +139,31 @@ module EasyBoxPacker
         }
       ]
     end
+
+    def find_smallest_container(items:)
+      array_of_lwh            = items.map { |i| i[:dimensions].sort.reverse }
+      items_max_length        = array_of_lwh.max { |x, y| x[0] <=> y[0] }[0]
+      items_max_width         = array_of_lwh.max { |x, y| x[1] <=> y[1] }[1]
+      items_min_height        = array_of_lwh.max { |x, y| x[2] <=> y[2] }[2]
+      items_total_height      = array_of_lwh.inject(0) { |sum, x| sum + x[2] }.round(1)
+      miminum_box = {}
+      (items_min_height..items_total_height.ceil).step(0.1).to_a.bsearch do |i|
+        packing = pack(
+          container: { dimensions: [items_max_length, items_max_width, i] },
+          items: array_of_lwh.map { |a| { dimensions: a }})
+
+        if packing[:packings].size == 1
+          miminum_box = {
+                          length: items_max_length,
+                          width: items_max_width,
+                          height: i
+                        }
+          true
+        else
+          false
+        end
+      end
+      miminum_box
+    end
   end
 end

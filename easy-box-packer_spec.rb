@@ -123,3 +123,41 @@ describe '.pack' do
     end
   end
 end
+
+describe '.find_smallest_container' do
+  it 'can get smallest container' do
+    container = EasyBoxPacker.find_smallest_container(
+        items: Array.new(10) {{ dimensions: [1, 1, 1] }}
+      )
+    expect(container).to eql({length: 1, width: 1, height: 10.0})
+  end
+
+  it 'can get smallest container' do
+    container = EasyBoxPacker.find_smallest_container(
+        items: Array.new(100) {{ dimensions: [1, 1, 1] }} + [{ dimensions: [10, 5, 1] }]
+      )
+    expect(container).to eql({length: 10, width: 5, height: 3.0})
+  end
+
+  it 'case 5' do
+    container = EasyBoxPacker.find_smallest_container(
+      items: [
+        { dimensions: [10, 20, 11] },
+        { dimensions: [20, 20, 5]  },
+        { dimensions: [20, 20, 4]  },
+        { dimensions: [20, 20, 1]  }
+      ]
+    )
+    expect(container).to eq({length: 20, width: 20, height: 20})
+    packings = EasyBoxPacker.pack(
+      container: { dimensions: [20, 20, 20] },
+      items: [
+        { dimensions: [10, 20, 11] },
+        { dimensions: [20, 20, 5]  },
+        { dimensions: [20, 20, 4]  },
+        { dimensions: [20, 20, 1]  }
+      ]
+    )
+    expect(packings[:packings].length).to eql(1)
+  end
+end
