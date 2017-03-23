@@ -65,6 +65,88 @@ module EasyBoxPacker
       { packings: packings, errors: errors }
     end
 
+    def find_smallest_container(items:)
+      possible_containers = []
+      invalid_containers  = []
+
+      min_vol = items.map { |h| h[:dimensions].inject(&:*) }.inject(&:+)
+      # order items from biggest to smallest
+      sorted_items = items.sort_by { |h| h[:dimensions].sort }.reverse
+
+      # base_container = sorted_items.first
+      based_container = sorted_items.first
+
+      find_possible_container(
+        possible_containers: possible_containers,
+        invalid_containers: invalid_containers,
+        container: based_container[:dimensions],
+        items: sorted_items.map {|i| i[:dimensions]},
+        item_index: 1,
+        min_vol: min_vol)
+
+      possible_containers.map { |a| a.sort }.sort_by { |a| [a.inject(&:*), a.inject(&:+)] }.each do |c|
+        packing = pack(
+          container: { dimensions: c },
+          items: items)
+        return c if packing[:packings].size == 1
+      end
+    end
+
+    private
+
+    def std(contents)
+      n = contents.size
+      contents.map!(&:to_f)
+      mean = contents.reduce(&:+)/n
+      sum_sqr = contents.map {|x| x * x}.reduce(&:+)
+      std_dev = Math.sqrt((sum_sqr - n * mean * mean)/(n-1))
+    end
+
+    def find_possible_container(possible_containers:,invalid_containers:,container:, items:, item_index:, min_vol:)
+      return unless items[item_index]
+      c_length, c_width, c_height = container.sort.reverse
+      b_length, b_width, b_height = items[item_index].sort.reverse
+      c_permutations = [
+        [c_width,  c_height, c_length],
+        [c_length, c_width,  c_height],
+        [c_length, c_height, c_width]
+      ]
+      b_permutations = [
+        [b_width,  b_height, b_length],
+        [b_length, b_width,  b_height],
+        [b_length, b_height, b_width]
+      ]
+
+      tmp_possible_containers = []
+      # (1) loops base_container 6 rotations
+      c_permutations.each do |c_perm|
+        # (2) try to puts items to 3 points, then it will create 6 different possible containers
+        b_permutations.each do |b_perm|
+          tmp_possible_containers << [  c_perm[0] + b_perm[0],     [c_perm[1], b_perm[1]].max, [c_perm[2], b_perm[2]].max]
+          tmp_possible_containers << [ [c_perm[0], b_perm[0]].max,  c_perm[1] + b_perm[1],     [c_perm[2], b_perm[2]].max]
+          tmp_possible_containers << [ [c_perm[0], b_perm[0]].max, [c_perm[1], b_perm[1]].max,  c_perm[2]+ b_perm[2]]
+        end
+      end
+      removed_tried_container = tmp_possible_containers.map { |a| a.sort }.uniq - possible_containers - invalid_containers
+      return unless removed_tried_container.any?
+      # (3) loop all container from smallest spaces to biggest space
+      removed_tried_container.sort_by { |a| [a.inject(&:*), a.inject(&:+)] }.each do |cont|
+        # (4) next unless l * w * h >= minimum_space
+        if cont.inject(&:*) >= min_vol
+          possible_containers << cont
+        else
+          # puts "invalid: #{cont}"
+          # invalid_containers << cont
+          # find_possible_container(possible_containers: possible_containers, invalid_containers: invalid_containers, container: cont, items: items, item_index: item_index + 1, min_vol: min_vol)
+        end
+      end
+      # minimum_space = (removed_tried_container).sort_by { |a| [a.inject(&:*), a.inject(&:+)] }.first
+      minimum_std   = (removed_tried_container).sort_by { |a| [std(a), a.inject(&:*), a.inject(&:+)] }.first
+      [minimum_std].uniq.compact.each do |cont|
+        find_possible_container(possible_containers: possible_containers, invalid_containers: invalid_containers, container: cont, items: items, item_index: item_index + 1, min_vol: min_vol)
+      end
+    end
+
     def place(item, space)
       item_width, item_height, item_length = item[:dimensions].sort.reverse
 
@@ -138,32 +220,6 @@ module EasyBoxPacker
           ]
         }
       ]
-    end
-
-    def find_smallest_container(items:)
-      array_of_lwh            = items.map { |i| i[:dimensions].sort.reverse }
-      items_max_length        = array_of_lwh.max { |x, y| x[0] <=> y[0] }[0]
-      items_max_width         = array_of_lwh.max { |x, y| x[1] <=> y[1] }[1]
-      items_min_height        = array_of_lwh.max { |x, y| x[2] <=> y[2] }[2]
-      items_total_height      = array_of_lwh.inject(0) { |sum, x| sum + x[2] }.round(1)
-      miminum_box = {}
-      (items_min_height..items_total_height.ceil).step(0.1).to_a.bsearch do |i|
-        packing = pack(
-          container: { dimensions: [items_max_length, items_max_width, i] },
-          items: array_of_lwh.map { |a| { dimensions: a }})
-
-        if packing[:packings].size == 1
-          miminum_box = {
-                          length: items_max_length,
-                          width: items_max_width,
-                          height: i
-                        }
-          true
-        else
-          false
-        end
-      end
-      miminum_box
     end
   end
 end

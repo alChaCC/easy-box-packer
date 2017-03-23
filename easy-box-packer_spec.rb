@@ -125,18 +125,51 @@ describe '.pack' do
 end
 
 describe '.find_smallest_container' do
-  it 'can get smallest container' do
+  it 'can get smallest container- with 10 items' do
     container = EasyBoxPacker.find_smallest_container(
         items: Array.new(10) {{ dimensions: [1, 1, 1] }}
       )
-    expect(container).to eql({length: 1, width: 1, height: 10.0})
+    expect(container).to eql([2.0, 2.0, 3.0])
   end
 
-  it 'can get smallest container' do
+  it 'can get smallest container - with 100 items' do
     container = EasyBoxPacker.find_smallest_container(
-        items: Array.new(100) {{ dimensions: [1, 1, 1] }} + [{ dimensions: [10, 5, 1] }]
+        items: Array.new(100) {{ dimensions: [1, 1, 1] }}
       )
-    expect(container).to eql({length: 10, width: 5, height: 3.0})
+    expect(container).to eql([4.0, 5.0, 5.0])
+  end
+
+  it 'can get smallest container - with 100 items' do
+    container = EasyBoxPacker.find_smallest_container(
+        items: Array.new(100) {{ dimensions: [10, 5, 4] }}
+      )
+    expect(container).to eql([26.0, 29.0, 30.0])
+  end
+
+  it 'can get smallest container - with 100 items' do
+    container = EasyBoxPacker.find_smallest_container(
+        items: Array.new(100) {{ dimensions: [4, 5, 5] }}
+      )
+    expect(container).to eql([21.0, 21.0, 28.0])
+  end
+
+  it 'can get smallest container - with 1000 items' do
+    container = EasyBoxPacker.find_smallest_container(
+        items: Array.new(1000) {{ dimensions: [1, 1, 1] }}
+      )
+    expect(container).to eql([10.0, 10.0, 10.0])
+  end
+
+  it 'case 1' do
+    container = EasyBoxPacker.find_smallest_container(
+      items: [
+        { dimensions: [4, 7, 9] },
+        { dimensions: [5, 8, 9] },
+        { dimensions: [11, 20, 40] },
+        { dimensions: [1, 2, 3] }
+      ]
+    )
+    expect(container).to eql([11.0, 20.0, 45.0])
   end
 
   it 'case 5' do
@@ -148,9 +181,10 @@ describe '.find_smallest_container' do
         { dimensions: [20, 20, 1]  }
       ]
     )
-    expect(container).to eq({length: 20, width: 20, height: 20})
+
+    expect(container).to eq([10.0, 20.0, 31.0])
     packings = EasyBoxPacker.pack(
-      container: { dimensions: [20, 20, 20] },
+      container: { dimensions: [10.0, 20.0, 31.0] },
       items: [
         { dimensions: [10, 20, 11] },
         { dimensions: [20, 20, 5]  },
