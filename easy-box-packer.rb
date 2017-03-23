@@ -99,7 +99,7 @@ module EasyBoxPacker
       contents.map!(&:to_f)
       mean = contents.reduce(&:+)/n
       sum_sqr = contents.map {|x| x * x}.reduce(&:+)
-      std_dev = Math.sqrt((sum_sqr - n * mean * mean)/(n-1))
+      Math.sqrt((sum_sqr - n * mean * mean)/(n-1))
     end
 
     def find_possible_container(possible_containers:,invalid_containers:,container:, items:, item_index:, min_vol:)
@@ -141,7 +141,7 @@ module EasyBoxPacker
         end
       end
       # minimum_space = (removed_tried_container).sort_by { |a| [a.inject(&:*), a.inject(&:+)] }.first
-      minimum_std   = (removed_tried_container).sort_by { |a| [std(a), a.inject(&:*), a.inject(&:+)] }.first
+      minimum_std = removed_tried_container.sort_by { |a| [std(a), a.inject(&:*), a.inject(&:+)] }.first
       [minimum_std].uniq.compact.each do |cont|
         find_possible_container(possible_containers: possible_containers, invalid_containers: invalid_containers, container: cont, items: items, item_index: item_index + 1, min_vol: min_vol)
       end
