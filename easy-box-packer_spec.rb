@@ -172,6 +172,27 @@ describe '.find_smallest_container' do
     expect(container).to eql([11.0, 20.0, 45.0])
   end
 
+   it 'case 2' do
+    container = EasyBoxPacker.find_smallest_container(
+      items: [
+        { dimensions: [4, 7, 9] },
+        { dimensions: [3, 2, 1] }
+      ]
+    )
+    expect(container).to eql([4.0, 7.0, 10.0])
+  end
+
+  it 'case 3' do
+    container = EasyBoxPacker.find_smallest_container(
+      items: [
+        { dimensions: [4, 7, 9] },
+        { dimensions: [3, 2, 1] },
+        { dimensions: [7, 7, 5] }
+      ]
+    )
+    expect(container).to eql([5.0, 7.0, 16.0])
+  end
+
   it 'case 5' do
     container = EasyBoxPacker.find_smallest_container(
       items: [

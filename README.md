@@ -14,6 +14,8 @@ gem  'easy-box-packer'
 
 ## Usage
 
+### Check all items can be packed in a container
+
 ``` ruby
 require 'easy-box-packer'
 
@@ -42,4 +44,13 @@ packings[2][:placements][0][:dimensions] # [1, 3, 3]
 packings[2][:placements][0][:position] # [0, 0, 0]
 packings[2][:placements][1][:dimensions] # [4, 1, 1]
 packings[2][:placements][1][:position] # [3, 0, 0]
+```
+
+### Get a reasonable smallest container by given boxes
+
+```
+container = EasyBoxPacker.find_smallest_container(
+    items: Array.new(1000) {{ dimensions: [1, 1, 1] }}
+  )
+container # [10, 10, 10]
 ```

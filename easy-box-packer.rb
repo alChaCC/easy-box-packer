@@ -118,9 +118,9 @@ module EasyBoxPacker
       ]
 
       tmp_possible_containers = []
-      # (1) loops base_container 6 rotations
+      # (1) loops base_container 3 rotations
       c_permutations.each do |c_perm|
-        # (2) try to puts items to 3 points, then it will create 6 different possible containers
+        # (2) try to puts items to 3 points, then it will create 3 different possible containers
         b_permutations.each do |b_perm|
           tmp_possible_containers << [  c_perm[0] + b_perm[0],     [c_perm[1], b_perm[1]].max, [c_perm[2], b_perm[2]].max]
           tmp_possible_containers << [ [c_perm[0], b_perm[0]].max,  c_perm[1] + b_perm[1],     [c_perm[2], b_perm[2]].max]
@@ -134,7 +134,7 @@ module EasyBoxPacker
         # (4) next unless l * w * h >= minimum_space
         if cont.inject(&:*) >= min_vol
           possible_containers << cont
-        else
+        # else
           # puts "invalid: #{cont}"
           # invalid_containers << cont
           # find_possible_container(possible_containers: possible_containers, invalid_containers: invalid_containers, container: cont, items: items, item_index: item_index + 1, min_vol: min_vol)
