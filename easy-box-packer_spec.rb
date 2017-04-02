@@ -215,4 +215,14 @@ describe '.find_smallest_container' do
     )
     expect(packings[:packings].length).to eql(1)
   end
+
+  it 'case 6 - 1 item' do
+    container = EasyBoxPacker.find_smallest_container(
+      items: [
+        { dimensions: [10, 20, 11] }
+      ]
+    )
+
+    expect(container).to eq([10.0, 20.0, 11.0])
+  end
 end

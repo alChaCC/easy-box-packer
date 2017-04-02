@@ -76,6 +76,10 @@ module EasyBoxPacker
       # base_container = sorted_items.first
       based_container = sorted_items.first
 
+      if sorted_items.size == 1
+        return based_container[:dimensions]
+      end
+
       find_possible_container(
         possible_containers: possible_containers,
         invalid_containers: invalid_containers,
@@ -128,6 +132,7 @@ module EasyBoxPacker
         end
       end
       removed_tried_container = tmp_possible_containers.map { |a| a.sort }.uniq - possible_containers - invalid_containers
+
       return unless removed_tried_container.any?
       # (3) loop all container from smallest spaces to biggest space
       removed_tried_container.sort_by { |a| [a.inject(&:*), a.inject(&:+)] }.each do |cont|

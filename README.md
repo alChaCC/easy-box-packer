@@ -19,7 +19,7 @@ gem  'easy-box-packer'
 ``` ruby
 require 'easy-box-packer'
 
-packings = BoxPacker.pack(
+cont = EasyBoxPacker.pack(
   container: { dimensions: [15, 20, 13], weight_limit: 50 },
   items: [
     { dimensions: [2, 3, 5], weight: 47 },
@@ -29,21 +29,21 @@ packings = BoxPacker.pack(
   ]
 )
 
-packings.length # 3
-packings[0][:weight] # 47
-packings[0][:placements].length # 1
-packings[0][:placements][0][:dimensions] # [2, 3, 5]
-packings[0][:placements][0][:position] # [0, 0, 0]
-packings[1][:weight] # 47
-packings[1][:placements].length # 1
-packings[1][:placements][0][:dimensions] # [2, 3, 5]
-packings[1][:placements][0][:position] # [0, 0, 0]
-packings[2][:weight] # 31
-packings[2][:placements].length # 2
-packings[2][:placements][0][:dimensions] # [1, 3, 3]
-packings[2][:placements][0][:position] # [0, 0, 0]
-packings[2][:placements][1][:dimensions] # [4, 1, 1]
-packings[2][:placements][1][:position] # [3, 0, 0]
+cont[:packings].length # 3
+cont[:packings][0][:weight] # 47
+cont[:packings][0][:placements].length # 1
+cont[:packings][0][:placements][0][:dimensions] # [2, 3, 5]
+cont[:packings][0][:placements][0][:position] # [0, 0, 0]
+cont[:packings][1][:weight] # 47
+cont[:packings][1][:placements].length # 1
+cont[:packings][1][:placements][0][:dimensions] # [2, 3, 5]
+cont[:packings][1][:placements][0][:position] # [0, 0, 0]
+cont[:packings][2][:weight] # 31
+cont[:packings][2][:placements].length # 2
+cont[:packings][2][:placements][0][:dimensions] # [1, 3, 3]
+cont[:packings][2][:placements][0][:position] # [0, 0, 0]
+cont[:packings][2][:placements][1][:dimensions] # [4, 1, 1]
+cont[:packings][2][:placements][1][:position] # [3, 0, 0]
 ```
 
 ### Get a reasonable smallest container by given boxes
