@@ -4,7 +4,7 @@ module EasyBoxPacker
       packings = []
       errors   = []
       # pack from biggest to smallest
-      items.sort_by { |h| h[:dimensions].sort }.reverse.each do |item|
+      items.sort_by { |h| h[:dimensions].sort.reverse }.reverse.each do |item|
         # If the item is just too big for the container lets give up on this
         if item[:weight].to_f > container[:weight_limit].to_f
           errors << "Item: #{item} is too heavy for container"
@@ -19,12 +19,13 @@ module EasyBoxPacker
           # item as well then skip on to the next packing
           next if packing[:weight].to_f + item[:weight].to_f > container[:weight_limit].to_f
 
+          # remove volume size = 0 (not possible to pack)
+          packing[:spaces].reject! { |space| space[:dimensions].inject(:*) == 0 }
           # try minimum space first
           packing[:spaces].sort_by { |h| h[:dimensions].sort }.each do |space|
             # Try placing the item in this space,
             # if it doesn't fit skip on the next space
             next unless placement = place(item, space)
-
             # Add the item to the packing and
             # break up the surrounding spaces
             packing[:placements] += [placement]
@@ -52,7 +53,6 @@ module EasyBoxPacker
           errors << "Item: #{item} cannot be placed in container"
           next
         end
-
         # Otherwise lets put the item in a new packing
         # and break up the remaing free space around it
         packings += [{
@@ -153,7 +153,7 @@ module EasyBoxPacker
     end
 
     def place(item, space)
-      item_width, item_height, item_length = item[:dimensions].sort.reverse
+      item_length, item_width, item_height = item[:dimensions].sort.reverse
 
       permutations = [
         [item_width, item_height, item_length],
@@ -187,44 +187,244 @@ module EasyBoxPacker
     end
 
     def break_up_space(space, placement)
-      [
-        {
-          dimensions: [
-            space[:dimensions][0],
-            space[:dimensions][1],
-            space[:dimensions][2] - placement[:dimensions][2]
-          ],
-          position: [
-            space[:position][0],
-            space[:position][1],
-            space[:position][2] + placement[:dimensions][2]
-          ]
-        },
-        {
-          dimensions: [
-            space[:dimensions][0],
-            space[:dimensions][1] - placement[:dimensions][1],
-            placement[:dimensions][2]
-          ],
-          position: [
-            space[:position][0],
-            space[:position][1] + placement[:dimensions][1],
-            space[:position][2]
-          ]
-        },
-        {
-          dimensions: [
-            space[:dimensions][0] - placement[:dimensions][0],
-            placement[:dimensions][1],
-            placement[:dimensions][2]
-          ],
-          position: [
-            space[:position][0] + placement[:dimensions][0],
-            space[:position][1],
-            space[:position][2]
-          ]
-        }
+      return_possible_spaces = [
+        # HEIGHT SPACE => WIDTH  => LENGTH
+        [
+          {
+            dimensions: [
+              space[:dimensions][0],
+              space[:dimensions][1],
+              space[:dimensions][2] - placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1],
+              space[:position][2] + placement[:dimensions][2]
+            ]
+          },
+          {
+            dimensions: [
+              space[:dimensions][0],
+              space[:dimensions][1] - placement[:dimensions][1],
+              placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1] + placement[:dimensions][1],
+              space[:position][2]
+            ]
+          },
+          {
+            dimensions: [
+              space[:dimensions][0] - placement[:dimensions][0],
+              placement[:dimensions][1],
+              placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0] + placement[:dimensions][0],
+              space[:position][1],
+              space[:position][2]
+            ]
+          }
+        ],
+        # HEIGHT SPACE => LENGTH => WIDTH
+        [
+          {
+            dimensions: [
+              space[:dimensions][0],
+              space[:dimensions][1],
+              space[:dimensions][2] - placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1],
+              space[:position][2] + placement[:dimensions][2]
+            ]
+          },
+          {
+            dimensions: [
+              space[:dimensions][0] - placement[:dimensions][0],
+              space[:dimensions][1],
+              placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0] + placement[:dimensions][0],
+              space[:position][1],
+              space[:position][2]
+            ]
+          },
+          {
+            dimensions: [
+              placement[:dimensions][0],
+              space[:dimensions][1] - placement[:dimensions][1],
+              placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1] + placement[:dimensions][1],
+              space[:position][2]
+            ]
+          }
+        ],
+        # LENGTH SPACE => HEIGHT => WIDTH
+        [
+          {
+            dimensions: [
+              space[:dimensions][0] - placement[:dimensions][0],
+              space[:dimensions][1],
+              space[:dimensions][2]
+            ],
+            position: [
+              space[:position][0] + placement[:dimensions][0],
+              space[:position][1],
+              space[:position][2]
+            ]
+          },
+          {
+            dimensions: [
+              placement[:dimensions][0],
+              space[:dimensions][1],
+              space[:dimensions][2] - placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1],
+              space[:position][2] + placement[:dimensions][2]
+            ]
+          },
+          {
+            dimensions: [
+              placement[:dimensions][0],
+              space[:dimensions][1] - placement[:dimensions][1],
+              placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1] + placement[:dimensions][1],
+              space[:position][2]
+            ]
+          }
+        ],
+        # LENGTH SPACE => WIDTH  => HEIGHT
+        [
+          {
+            dimensions: [
+              space[:dimensions][0] - placement[:dimensions][0],
+              space[:dimensions][1],
+              space[:dimensions][2]
+            ],
+            position: [
+              space[:position][0] + placement[:dimensions][0],
+              space[:position][1],
+              space[:position][2]
+            ]
+          },
+          {
+            dimensions: [
+              placement[:dimensions][0],
+              space[:dimensions][1] - placement[:dimensions][1],
+              space[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1] + placement[:dimensions][1],
+              space[:position][2]
+            ]
+          },
+          {
+            dimensions: [
+              placement[:dimensions][0],
+              placement[:dimensions][1],
+              space[:dimensions][2] - placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1],
+              space[:position][2] + placement[:dimensions][2]
+            ]
+          }
+        ],
+        # WIDTH SPACE  => LENGTH => HEIGHT
+        [
+          {
+            dimensions: [
+              space[:dimensions][0],
+              space[:dimensions][1] - placement[:dimensions][1],
+              space[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1] + placement[:dimensions][1],
+              space[:position][2]
+            ]
+          },
+          {
+            dimensions: [
+              space[:dimensions][0] - placement[:dimensions][0],
+              placement[:dimensions][1],
+              space[:dimensions][2]
+            ],
+            position: [
+              space[:position][0] + placement[:dimensions][0],
+              space[:position][1],
+              space[:position][2]
+            ]
+          },
+          {
+            dimensions: [
+              placement[:dimensions][0],
+              placement[:dimensions][1],
+              space[:dimensions][2] - placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1],
+              space[:position][2] + placement[:dimensions][2]
+            ]
+          }
+        ],
+        # WIDTH SPACE  => HEIGHT => LENGTH
+        [
+          {
+            dimensions: [
+              space[:dimensions][0],
+              space[:dimensions][1] - placement[:dimensions][1],
+              space[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1] + placement[:dimensions][1],
+              space[:position][2]
+            ]
+          },
+          {
+            dimensions: [
+              space[:dimensions][0],
+              placement[:dimensions][1],
+              space[:dimensions][2] - placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0],
+              space[:position][1],
+              space[:position][2] + placement[:dimensions][2]
+            ]
+          },
+          {
+            dimensions: [
+              space[:dimensions][0] - placement[:dimensions][0],
+              placement[:dimensions][1],
+              placement[:dimensions][2]
+            ],
+            position: [
+              space[:position][0] + placement[:dimensions][0],
+              space[:position][1],
+              space[:position][2]
+            ]
+          }
+        ]
       ]
+      # PICK biggest
+      return_possible_spaces.sort_by { |a| a.map {|aa| aa[:dimensions].sort}}.last
     end
   end
 end

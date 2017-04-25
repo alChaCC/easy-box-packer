@@ -23,10 +23,10 @@ describe '.pack' do
     expect(packings[:packings][1][:placements][0][:position]).to eql([0, 0, 0])
     expect(packings[:packings][2][:weight]).to eql(31.0)
     expect(packings[:packings][2][:placements].length).to eql(2)
-    expect(packings[:packings][2][:placements][0][:dimensions]).to eql([1, 3, 3])
+    expect(packings[:packings][2][:placements][0][:dimensions]).to eql([1, 1, 4])
     expect(packings[:packings][2][:placements][0][:position]).to eql([0, 0, 0])
-    expect(packings[:packings][2][:placements][1][:dimensions]).to eql([4, 1, 1])
-    expect(packings[:packings][2][:placements][1][:position]).to eql([1, 0, 0])
+    expect(packings[:packings][2][:placements][1][:dimensions]).to eql([1, 3, 3])
+    expect(packings[:packings][2][:placements][1][:position]).to eql([0, 1, 0])
   end
 
   it 'no weight given' do
@@ -121,6 +121,18 @@ describe '.pack' do
       )
       expect(packings[:packings].length).to eql(2)
     end
+
+    it 'case 6' do
+      packings = EasyBoxPacker.pack(
+        container: { dimensions: [39, 33.5, 58] },
+        items: [
+          {dimensions: [26.0, 26.0, 26.5]},
+          {dimensions: [18.0, 23.0, 39.0]},
+          {dimensions: [39.0, 14.0, 33.5]}
+        ]
+      )
+      expect(packings[:packings].length).to eql(1)
+    end
   end
 end
 
@@ -143,14 +155,14 @@ describe '.find_smallest_container' do
     container = EasyBoxPacker.find_smallest_container(
         items: Array.new(100) {{ dimensions: [10, 5, 4] }}
       )
-    expect(container).to eql([26.0, 29.0, 30.0])
+    expect(container).to eql([26.0, 29.0, 36.0])
   end
 
   it 'can get smallest container - with 100 items' do
     container = EasyBoxPacker.find_smallest_container(
         items: Array.new(100) {{ dimensions: [4, 5, 5] }}
       )
-    expect(container).to eql([21.0, 21.0, 28.0])
+    expect(container).to eql([21.0, 24.0, 26.0])
   end
 
   it 'can get smallest container - with 1000 items' do
@@ -216,7 +228,7 @@ describe '.find_smallest_container' do
     expect(packings[:packings].length).to eql(1)
   end
 
-  it 'case 6 - 1 item' do
+  it 'case 6' do
     container = EasyBoxPacker.find_smallest_container(
       items: [
         { dimensions: [10, 20, 11] }
@@ -224,5 +236,27 @@ describe '.find_smallest_container' do
     )
 
     expect(container).to eq([10.0, 20.0, 11.0])
+  end
+
+  # it 'case 7' do
+  #   container = EasyBoxPacker.find_smallest_container(
+  #     items: [
+  #       {dimensions: [110, 30, 10]}, {dimensions: [110, 20, 10]}, {dimensions: [110, 10, 5]},
+  #       {dimensions: [110, 30, 10]}, {dimensions: [110, 20, 10]}, {dimensions: [110, 10, 5]},
+  #       {dimensions: [110, 30, 10]}, {dimensions: [110, 20, 10]}, {dimensions: [110, 10, 5]}
+  #     ]
+  #   )
+  #   expect(container).to eq([30.0, 60.0, 110.0])
+  # end
+
+  it 'case 8' do
+    container = EasyBoxPacker.find_smallest_container(
+      items: [
+        {dimensions: [26.0, 26.0, 26.5]},
+        {dimensions: [18.0, 23.0, 39.0]},
+        {dimensions: [39.0, 14.0, 33.5]}
+      ]
+    )
+    expect(container).to eq([33.5, 39.0, 58.0])
   end
 end
