@@ -133,6 +133,30 @@ describe '.pack' do
       )
       expect(packings[:packings].length).to eql(1)
     end
+
+    it 'case 7' do
+      packings = EasyBoxPacker.pack(
+        container: { dimensions: [139, 50, 40] },
+        items: [
+          {dimensions: [10, 30, 139]},
+          {dimensions: [16, 24, 105]},
+          {dimensions: [12, 50, 103]}
+        ]
+      )
+      expect(packings[:packings].length).to eql(1)
+    end
+
+    it 'case 8' do
+      packings = EasyBoxPacker.pack(
+        container: { dimensions: [46.5, 32, 15] },
+        items: [
+          {dimensions: [7, 8, 9]},
+          {dimensions: [2, 2, 3]},
+          {dimensions: [5, 31, 45]}
+        ]
+      )
+      expect(packings[:packings].length).to eql(1)
+    end
   end
 end
 
