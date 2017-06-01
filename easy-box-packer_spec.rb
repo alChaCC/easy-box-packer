@@ -283,4 +283,12 @@ describe '.find_smallest_container' do
     )
     expect(container).to eq([33.5, 39.0, 58.0])
   end
+
+  it 'case 9' do
+    container = EasyBoxPacker.find_smallest_container(
+        items: Array.new(67) {{ dimensions: [36.0, 27.0, 0.3] }}
+      )
+
+    expect(container).to eql([36.0, 27.0, 20.1])
+  end
 end

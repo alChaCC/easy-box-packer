@@ -92,12 +92,13 @@ module EasyBoxPacker
         item_index: 1,
         min_vol: min_vol)
 
-      possible_containers.map { |a| a.sort }.sort_by { |a| [a.inject(&:*), a.inject(&:+)] }.each do |c|
+      select_container = possible_containers.map { |a| a.sort }.sort_by { |a| [a.inject(&:*), a.inject(&:+)] }.each do |c|
         packing = pack(
           container: { dimensions: c },
           items: items)
-        return c if packing[:packings].size == 1
+        break c if packing[:packings].size == 1
       end
+      check_container_is_bigger_than_greedy_box({dimensions: select_container}, items) ? item_greedy_box(items) : select_container
     end
 
     private
@@ -107,7 +108,7 @@ module EasyBoxPacker
       contents.map!(&:to_f)
       mean = contents.reduce(&:+)/n
       sum_sqr = contents.map {|x| x * x}.reduce(&:+)
-      Math.sqrt((sum_sqr - n * mean * mean)/(n-1))
+      Math.sqrt(((sum_sqr - n * mean * mean)/(n-1)).abs)
     end
 
     def find_possible_container(possible_containers:,invalid_containers:,container:, items:, item_index:, min_vol:)
