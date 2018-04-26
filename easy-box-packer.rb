@@ -38,7 +38,6 @@ module EasyBoxPacker
           break if item_has_been_packed
         end
         next if item_has_been_packed
-
         # Can't fit in any of the spaces for the current packings
         # so lets try a new space the size of the container
         space = {
@@ -96,7 +95,7 @@ module EasyBoxPacker
         packing = pack(
           container: { dimensions: c },
           items: items)
-        break c if packing[:packings].size == 1
+        break c if packing[:packings].size == 1 && packing[:errors].size == 0
       end
       check_container_is_bigger_than_greedy_box({dimensions: select_container}, items) ? item_greedy_box(items) : select_container
     end

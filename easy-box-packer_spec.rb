@@ -262,16 +262,16 @@ describe '.find_smallest_container' do
     expect(container).to eq([10.0, 20.0, 11.0])
   end
 
-  # it 'case 7' do
-  #   container = EasyBoxPacker.find_smallest_container(
-  #     items: [
-  #       {dimensions: [110, 30, 10]}, {dimensions: [110, 20, 10]}, {dimensions: [110, 10, 5]},
-  #       {dimensions: [110, 30, 10]}, {dimensions: [110, 20, 10]}, {dimensions: [110, 10, 5]},
-  #       {dimensions: [110, 30, 10]}, {dimensions: [110, 20, 10]}, {dimensions: [110, 10, 5]}
-  #     ]
-  #   )
-  #   expect(container).to eq([30.0, 60.0, 110.0])
-  # end
+  it 'case 7' do
+    container = EasyBoxPacker.find_smallest_container(
+      items: [
+        {dimensions: [110, 30, 10]}, {dimensions: [110, 20, 10]}, {dimensions: [110, 10, 5]},
+        {dimensions: [110, 30, 10]}, {dimensions: [110, 20, 10]}, {dimensions: [110, 10, 5]},
+        {dimensions: [110, 30, 10]}, {dimensions: [110, 20, 10]}, {dimensions: [110, 10, 5]}
+      ]
+    )
+    expect(container).to eq([30.0, 60.0, 110.0])
+  end
 
   it 'case 8' do
     container = EasyBoxPacker.find_smallest_container(
@@ -290,5 +290,44 @@ describe '.find_smallest_container' do
       )
 
     expect(container).to eql([36.0, 27.0, 20.1])
+  end
+
+  it 'case 10' do
+    container = EasyBoxPacker.find_smallest_container(
+        items: [
+          { dimensions: [13, 23.5, 48] },
+          { dimensions: [13, 23.5, 48] },
+          { dimensions: [13, 23.5, 48] }
+        ]
+      )
+    expect(container).to eql([48, 23.5, 39.0])
+  end
+
+
+  it 'case 11' do
+    container = EasyBoxPacker.find_smallest_container(
+        items: [
+          { dimensions: [73, 8, 4] },
+          { dimensions: [39, 34, 4] },
+          { dimensions: [40, 7, 5] },
+          { dimensions: [21, 8, 7] },
+          { dimensions: [27, 27, 17] }
+        ]
+      )
+    expect(container).to eql([34.0, 34.0, 79.0])
+  end
+
+
+  it 'case 12' do
+    container = EasyBoxPacker.find_smallest_container(
+        items: [
+          { dimensions: [22, 19, 27] },
+          { dimensions: [22, 19, 27] },
+          { dimensions: [22, 19, 27] },
+          { dimensions: [22, 19, 27] },
+          { dimensions: [22, 19, 27] }
+        ]
+      )
+    expect(container).to eql([27.0, 46.0, 57.0])
   end
 end
