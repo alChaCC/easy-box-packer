@@ -7,7 +7,7 @@ module EasyBoxPacker
       items.sort_by { |h| h[:dimensions].sort.reverse }.reverse.each do |item|
         # If the item is just too big for the container lets give up on this
         if item[:weight].to_f > container[:weight_limit].to_f
-          errors << "Item: #{item} is too heavy for container"
+          errors << { item: item, reason: 'too heavy for container' }
           next
         end
 
@@ -49,7 +49,7 @@ module EasyBoxPacker
         # If it can't be placed in this space, then it's just
         # too big for the container and we should abandon hope
         unless placement
-          errors << "Item: #{item} cannot be placed in container"
+          errors << { item: item, reason: 'cannot be placed in container' }
           next
         end
         # Otherwise lets put the item in a new packing
@@ -183,14 +183,11 @@ module EasyBoxPacker
       # select rotation with smallest margin
       final = possible_rotations_and_margins.sort_by { |a| a[:margin].sort }.first
       return unless final
-      placement = {
+      return {
         dimensions: final[:rotation],
         position: space[:position],
         weight: item[:weight].to_f
       }
-      # retain optional attributes, i.e. item identifiers, from item to placement
-      item.each { |key, value| placement[key] ||= value }
-      return placement
     end
 
     def break_up_space(space, placement)
