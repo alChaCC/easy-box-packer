@@ -183,11 +183,14 @@ module EasyBoxPacker
       # select rotation with smallest margin
       final = possible_rotations_and_margins.sort_by { |a| a[:margin].sort }.first
       return unless final
-      return {
+      placement = {
         dimensions: final[:rotation],
         position: space[:position],
         weight: item[:weight].to_f
       }
+      # retain optional attributes, i.e. item identifiers, from item to placement
+      item.each { |key, value| placement[key] ||= value }
+      return placement
     end
 
     def break_up_space(space, placement)
