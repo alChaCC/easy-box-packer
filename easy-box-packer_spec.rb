@@ -106,7 +106,7 @@ describe '.pack' do
         ]
       )
       expect(packings[:packings].length).to eql(1)
-      expect(packings[:errors]).to eql(["Item: {:dimensions=>[40, 10, 34]} cannot be placed in container"])
+      expect(packings[:errors]).to eql([{:item =>{:dimensions=>[40, 10, 34]},:reason=>'cannot be placed in container'}])
     end
 
     it 'case 5' do
