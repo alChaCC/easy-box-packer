@@ -139,35 +139,6 @@ fills the box that packs the most item volume per cost and repeats.
 Each box in the result also has `container_dimensions` (the frame the positions are in,
 the third axis is up) and every placement has `step:` and `support:`, see below.
 
-### Shipping with DIM weight couriers (FedEx, DHL Express, Aramex, ...)
-
-These couriers charge the bigger of the actual weight and the dimensional weight
-(outer length x width x height / divisor). `chargeable_weight_cost` builds a `cost`
-for `select_box` that does this:
-
-```ruby
-cost = EasyBoxPacker.chargeable_weight_cost(
-  divisor: 5000,            # cm3 per kg
-  weight_increment: 0.5,    # round the chargeable weight up to 0.5 kg
-  dimension_increment: 1,   # round each side up to a whole cm first
-  rate: nil                 # optional ->(kg) { price }, otherwise the cost is the kg
-)
-
-EasyBoxPacker.select_box(
-  boxes: [
-    { id: 'M', dimensions: [30, 25, 20], outer_dimensions: [31, 26, 21.5], weight: 0.3 } # weight = empty box, kg
-  ],
-  items: items,
-  cost: cost
-)[:total_cost] # total chargeable kg (or price with rate:)
-```
-
-The divisor and rounding differ by carrier, service and contract. 5000 cm3/kg is
-the common one, but some services use 6000. Check the numbers on your own account.
-
-Any `cost` lambda that takes two arguments `(box, weight)` is called with the weight
-packed in that box; a one-argument lambda gets only the box.
-
 ### Upright and fragile items
 
 ```ruby
@@ -220,8 +191,6 @@ bundle exec rspec easy-box-packer_spec.rb
 
 - Item constraints: `upright: true` and `fragile: true`.
 - `loading_order` with `step:` and `support:`; `select_box` placements include them.
-- `chargeable_weight_cost` for DIM weight couriers, boxes take `outer_dimensions` and `weight`.
-- `cost` lambdas taking `(box, weight)` get the packed weight.
 - `pack` and `select_box` results include `container_dimensions`.
 
 ### 0.3.0

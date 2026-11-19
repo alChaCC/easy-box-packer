@@ -717,36 +717,3 @@ describe '.loading_order' do
     expect(placements.all? { |p| p[:support].between?(0, 1) }).to be(true)
   end
 end
-
-describe '.chargeable_weight_cost' do
-  let(:cost) { EasyBoxPacker.chargeable_weight_cost }
-
-  it 'charges the bigger of actual and dimensional weight, rounded up' do
-    box = { dimensions: [40, 30, 25], outer_dimensions: [40.2, 30.4, 25.1] }
-    # sides rounded up to 41 x 31 x 26 = 33046 cm3 / 5000 = 6.61 kg -> 7.0
-    expect(cost.call(box, 2)).to eq(7.0)
-    expect(cost.call(box, 8.2)).to eq(8.5)
-    expect(cost.call(box.merge(weight: 0.4), 6.9)).to eq(7.5)
-  end
-
-  it 'takes the divisor, increments and a rate' do
-    c = EasyBoxPacker.chargeable_weight_cost(divisor: 6000, weight_increment: 1, dimension_increment: 0,
-                                             rate: ->(kg) { 100 + 20 * kg })
-    expect(c.call({ dimensions: [30, 20, 10] }, 0.5)).to eq(120.0) # 1 kg dimensional
-    expect { EasyBoxPacker.chargeable_weight_cost(divisor: 0) }.to raise_error(ArgumentError)
-  end
-
-  it 'lets select_box pick the box with the lowest chargeable weight' do
-    boxes = [
-      { id: 'cube', dimensions: [30, 30, 30] },          # 5.4 kg dimensional
-      { id: 'flat', dimensions: [40, 30, 12] },          # 2.88 kg dimensional
-    ]
-    items = [{ dimensions: [35, 25, 10], weight: 1 }]
-    result = EasyBoxPacker.select_box(boxes: boxes, items: items, cost: cost)
-    expect(result[:boxes].map { |b| b[:box][:id] }).to eq(['flat'])
-    expect(result[:total_cost]).to eq(3.0)
-
-    heavy = EasyBoxPacker.select_box(boxes: boxes, items: [items[0].merge(weight: 9)], cost: cost)
-    expect(heavy[:total_cost]).to eq(9.0)
-  end
-end

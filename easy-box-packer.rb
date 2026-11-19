@@ -80,44 +80,16 @@ module EasyBoxPacker
       with_steps(placements).sort_by { |pl| pl[:step] }
     end
 
-    # Cost lambda for #select_box that prices a box like DIM weight couriers do:
-    # chargeable weight = max(actual weight, outer volume / divisor), rounded up.
-    #
-    # divisor             - cm3 per kg (default 5000). Check your carrier and contract,
-    #                       e.g. some services use 6000.
-    # weight_increment    - chargeable weight is rounded up to this many kg (default 0.5, 0 = none).
-    # dimension_increment - each side is rounded up to this many cm first (default 1, 0 = none).
-    # rate                - optional lambda chargeable_kg -> price; without it the cost is the kg.
-    #
-    # Uses box[:outer_dimensions] (falls back to box[:dimensions]) and adds the empty
-    # box weight box[:weight] (kg, optional) to the contents.
-    def chargeable_weight_cost(divisor: 5000, weight_increment: 0.5, dimension_increment: 1, rate: nil)
-      raise ArgumentError, 'divisor must be a positive number' unless divisor.is_a?(Numeric) && divisor > 0
-      validate_non_negative!(:weight_increment, weight_increment)
-      validate_non_negative!(:dimension_increment, dimension_increment)
-      raise ArgumentError, 'rate must respond to #call' if rate && !rate.respond_to?(:call)
-
-      lambda do |box, contents_weight|
-        dims = (box[:outer_dimensions] || box[:dimensions]).map { |d| round_up(d, dimension_increment) }
-        actual = contents_weight.to_f + box[:weight].to_f
-        kg = round_up([actual, volume(dims) / divisor.to_f].max, weight_increment)
-        rate ? rate.call(kg) : kg
-      end
-    end
-
     # Choose boxes from the boxes you have and show how to pack the items in them.
     #
     # boxes                - [{ dimensions: [l, w, h] (cm, inside), weight_limit: kg (optional),
     #                          cost: number (optional, default volume), padding: cm (optional),
-    #                          outer_dimensions: [l, w, h] and weight: kg of the empty box (optional,
-    #                          used by #chargeable_weight_cost), any other keys such as id: are
-    #                          returned untouched }]
+    #                          any other keys such as id: are returned untouched }]
     # items                - [{ dimensions: [l, w, h] (cm), weight: kg (optional), id: ... }]
     # allow_multiple_boxes - split the items over several boxes when no single box fits (default true).
     # padding              - cushioning in cm kept free on every side of every box (default 0).
     #                        A box's own :padding overrides it.
-    # cost                 - lambda taking a box hash (or a box hash and the packed weight) and
-    #                        returning a number, lower is better. See #chargeable_weight_cost.
+    # cost                 - lambda taking a box hash and returning a number, lower is better.
     #                        Default: box[:cost], or the box volume when it has none.
     # max_items            - raise ArgumentError when more items are given (default nil, no limit).
     # time_limit           - soft limit in seconds (default nil). After it only the first split
@@ -145,20 +117,12 @@ module EasyBoxPacker
         raise ArgumentError, "invalid box dimensions: #{box.inspect}" unless box.is_a?(Hash) && valid_dimensions?(box[:dimensions])
         box_padding = box.key?(:padding) ? box[:padding] : padding
         validate_non_negative!(:padding, box_padding)
-        if box.key?(:outer_dimensions) && !valid_dimensions?(box[:outer_dimensions])
-          raise ArgumentError, "invalid box outer_dimensions: #{box.inspect}"
-        end
         usable = box[:dimensions].map { |d| d - 2 * box_padding }
         next unless usable.all? { |d| d > EPSILON }
-        # a cost lambda taking (box, weight) depends on what is packed, so it is computed later
-        box_cost = cost ? (cost_arity(cost) == 1 ? cost.call(box) : nil) : (box[:cost] || volume(box[:dimensions]))
-        check_cost!(box, box_cost) if box_cost
+        box_cost = cost ? cost.call(box) : (box[:cost] || volume(box[:dimensions]))
+        raise ArgumentError, "box cost must be a non-negative number: #{box.inspect}" unless box_cost.is_a?(Numeric) && box_cost >= 0
         { box: box, container: { dimensions: usable, weight_limit: box[:weight_limit] }, cost: box_cost }
       end.compact
-      cost_of = lambda do |cand, weight|
-        next cand[:cost] if cand[:cost]
-        check_cost!(cand[:box], cost.call(cand[:box], weight))
-      end
 
       unpacked  = []
       remaining = []
@@ -192,9 +156,9 @@ module EasyBoxPacker
         # cheapest single box that holds everything left
         single = results
           .select { |_, r| r[:packings].size == 1 && r[:errors].empty? }
-          .min_by { |c, r| [cost_of.call(c, r[:packings].first[:weight]), volume(c[:container][:dimensions])] }
+          .min_by { |c, _| [c[:cost], volume(c[:container][:dimensions])] }
         if single
-          chosen << box_result(single[0], single[1], cost_of)
+          chosen << box_result(single[0], single[1])
           break
         end
         unless allow_multiple_boxes
@@ -206,10 +170,9 @@ module EasyBoxPacker
         c, packing, r = results.map do |cand, res|
           [cand, res[:packings].max_by { |p| packed_volume(p) }, res]
         end.reject { |_, p, _| p.nil? }.max_by do |cand, p, _|
-          box_cost = cost_of.call(cand, p[:weight])
-          [box_cost.zero? ? Float::INFINITY : packed_volume(p) / box_cost, packed_volume(p), -box_cost]
+          [cand[:cost].zero? ? Float::INFINITY : packed_volume(p) / cand[:cost], packed_volume(p), -cand[:cost]]
         end
-        chosen << box_result(c, r.merge(packings: [packing]), cost_of)
+        chosen << box_result(c, r.merge(packings: [packing]))
         packed = packing[:placements].map { |pl| pl[:item] }
         remaining = remaining.reject { |item| packed.any? { |p| p.equal?(item) } }
       end
@@ -419,14 +382,14 @@ module EasyBoxPacker
     end
 
     # result is a #pack result whose first packing is the one used for this box
-    def box_result(candidate, result, cost_of)
+    def box_result(candidate, result)
       packing = result[:packings].first
       {
         box: candidate[:box],
         container_dimensions: result[:container_dimensions],
         placements: with_steps(packing[:placements]),
         weight: packing[:weight],
-        cost: cost_of.call(candidate, packing[:weight])
+        cost: candidate[:cost]
       }
     end
 
@@ -439,16 +402,6 @@ module EasyBoxPacker
       step = {}
       order.each_with_index { |i, s| step[i] = s + 1 }
       placements.each_with_index.map { |pl, i| pl.merge(step: step[i], support: support_ratio(pl, placements)) }
-    end
-
-    # callables without #arity are called with the box only
-    def cost_arity(cost)
-      cost.respond_to?(:arity) ? cost.arity : 1
-    end
-
-    def check_cost!(box, value)
-      raise ArgumentError, "box cost must be a non-negative number: #{box.inspect}" unless value.is_a?(Numeric) && value >= 0
-      value
     end
 
     def packed_volume(packing)
@@ -551,11 +504,6 @@ module EasyBoxPacker
     def container_frames(dimensions)
       l, w, h = dimensions.sort.reverse
       [[l, w, h], [l, h, w], [w, h, l]].uniq
-    end
-
-    def round_up(value, increment)
-      return value.to_f if increment.zero?
-      ((value / increment.to_f - EPSILON).ceil * increment).round(6)
     end
 
     def footprint_overlap(a_pos, a_dims, b_pos, b_dims)
