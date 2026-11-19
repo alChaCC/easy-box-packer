@@ -641,3 +641,79 @@ describe 'tuning options' do
     expect { EasyBoxPacker.find_smallest_container(items: CASE_7_ITEMS, max_side_values: 0) }.to raise_error(ArgumentError)
   end
 end
+
+describe 'item constraints' do
+  def on_top?(lower, upper)
+    xy = (0..1).all? do |k|
+      lower[:position][k] < upper[:position][k] + upper[:dimensions][k] &&
+        upper[:position][k] < lower[:position][k] + lower[:dimensions][k]
+    end
+    xy && upper[:position][2] >= lower[:position][2] + lower[:dimensions][2]
+  end
+
+  it 'keeps upright items standing, standing the box on another side when needed' do
+    bottle = { id: 'bottle', dimensions: [10, 10, 30], upright: true }
+    result = EasyBoxPacker.pack(container: { dimensions: [40, 35, 20] }, items: [bottle])
+    expect(result[:errors]).to eq([])
+    expect(result[:container_dimensions][2]).to be >= 30
+    expect(result[:packings][0][:placements][0][:dimensions][2]).to eq(30)
+  end
+
+  it 'reports an upright item that is too tall on every side' do
+    result = EasyBoxPacker.pack(container: { dimensions: [25, 20, 20] }, items: [{ dimensions: [5, 5, 30], upright: true }])
+    expect(result[:errors].size).to eq(1)
+  end
+
+  it 'never puts anything on top of a fragile item' do
+    egg  = { id: 'egg',  dimensions: [10, 10, 5], fragile: true }
+    book = { id: 'book', dimensions: [10, 10, 5] }
+    result = EasyBoxPacker.pack(container: { dimensions: [10, 10, 10] }, items: [egg, book])
+    expect(result[:packings].size).to eq(1)
+    placements = result[:packings][0][:placements]
+    egg_pl  = placements.find { |p| p[:item].equal?(egg) }
+    book_pl = placements.find { |p| p[:item].equal?(book) }
+    expect(on_top?(egg_pl, book_pl)).to be(false)
+
+    # stacking is the only way two of these fit, and a fragile one can not take that
+    big_egg  = { dimensions: [10, 10, 6], fragile: true, upright: true }
+    two_eggs = EasyBoxPacker.pack(container: { dimensions: [10, 10, 12] }, items: [big_egg, big_egg.dup])
+    expect(two_eggs[:packings].size).to eq(2)
+  end
+
+  it 'find_smallest_container keeps the constraints' do
+    items = [
+      { dimensions: [10, 10, 30], upright: true },
+      { dimensions: [20, 20, 5], fragile: true },
+      { dimensions: [15, 10, 8] }
+    ]
+    dims = EasyBoxPacker.find_smallest_container(items: items, time_limit: nil)
+    result = EasyBoxPacker.pack(container: { dimensions: dims }, items: items)
+    expect(result[:packings].size).to eq(1)
+    expect(result[:errors]).to eq([])
+  end
+end
+
+describe '.loading_order' do
+  it 'numbers placements bottom up and reports how well each is supported' do
+    result = EasyBoxPacker.pack(
+      container: { dimensions: [10, 10, 10] },
+      items: [{ id: 'top', dimensions: [10, 10, 5] }, { id: 'small', dimensions: [5, 5, 5] }],
+      split_strategies: [:legacy]
+    )
+    steps = EasyBoxPacker.loading_order(result[:packings][0][:placements])
+    expect(steps.map { |s| s[:step] }).to eq([1, 2])
+    expect(steps.first[:position][2]).to eq(0)
+    expect(steps.first[:support]).to eq(1.0)
+    steps.each_cons(2) { |a, b| expect(a[:position][2]).to be <= b[:position][2] }
+  end
+
+  it 'select_box adds step and support to every placement' do
+    result = EasyBoxPacker.select_box(
+      boxes: [{ dimensions: [30, 25, 20] }],
+      items: Array.new(6) { { dimensions: [10, 10, 10] } }
+    )
+    placements = result[:boxes][0][:placements]
+    expect(placements.map { |p| p[:step] }.sort).to eq((1..6).to_a)
+    expect(placements.all? { |p| p[:support].between?(0, 1) }).to be(true)
+  end
+end

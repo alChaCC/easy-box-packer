@@ -136,6 +136,28 @@ fills the box that packs the most item volume per cost and repeats.
 
 `unpacked` reasons: `:invalid_dimensions`, `:too_big`, `:too_heavy`, `:no_single_box`.
 
+Each box in the result also has `container_dimensions` (the frame the positions are in,
+the third axis is up) and every placement has `step:` and `support:`, see below.
+
+### Upright and fragile items
+
+```ruby
+{ dimensions: [8, 8, 25], upright: true }  # dimensions[2] is the height and stays vertical
+{ dimensions: [20, 15, 6], fragile: true } # nothing is placed on top of it
+```
+
+The box may be stood on another side to fit upright items; the frame used is returned
+as `container_dimensions` (`pack`) and the third axis is up. With constraints the flat
+stacking fallback is not used.
+
+### Loading order
+
+`EasyBoxPacker.loading_order(placements)` sorts placements bottom layer first, then
+from the back corner, and adds `step:` (1, 2, ...) and `support:`, the share of the
+item's bottom resting on the floor or on items below. `support` below 1.0 means the
+item overhangs empty space, fill it with cushioning or warn the packer.
+`select_box` already adds both keys to its placements.
+
 ### Tuning options
 
 | option | methods | default | meaning |
@@ -164,6 +186,12 @@ bundle exec rspec easy-box-packer_spec.rb
 ```
 
 ## Changelog
+
+### 0.4.0
+
+- Item constraints: `upright: true` and `fragile: true`.
+- `loading_order` with `step:` and `support:`; `select_box` placements include them.
+- `pack` and `select_box` results include `container_dimensions`.
 
 ### 0.3.0
 

@@ -37,23 +37,47 @@ module EasyBoxPacker
     #                    [:legacy] is the fastest and reproduces 0.0.x results.
     # greedy_fallback  - when more than one container is needed but all items stacked flat
     #                    would fit, return that stack instead (default true).
+    #
+    # Item constraints (optional):
+    #   upright: true - dimensions[2] is the item's height and must stay vertical
+    #                   (it can still turn around the vertical axis).
+    #   fragile: true - nothing may be placed on top of it.
+    # The vertical axis is the third axis of the result. Without constraints the frame is
+    # the container sorted descending; with them the container may be stood on another
+    # side, the frame used is returned as :container_dimensions.
     def pack(container:, items:, split_strategies: SPLIT_STRATEGIES, greedy_fallback: true)
       validate_container!(container)
       validate_split_strategies!(split_strategies)
       weight_limit = weight_limit_of(container)
+      constrained = constrained?(items)
+      frames = constrained ? container_frames(container[:dimensions]) : [container[:dimensions].sort.reverse]
 
       best = nil
-      split_strategies.each do |strategy|
-        result = pack_with_strategy(container, items, weight_limit, strategy)
-        best = result if best.nil? || result[:packings].size < best[:packings].size
-        break if best[:packings].size <= 1
+      frames.each do |frame|
+        split_strategies.each do |strategy|
+          result = pack_with_strategy(frame, items, weight_limit, strategy)
+          if best.nil? || ([result[:errors].size, result[:packings].size] <=> [best[:errors].size, best[:packings].size]) < 0
+            best = result
+          end
+          break if best[:packings].size <= 1
+        end
+        break if best[:packings].size <= 1 && best[:errors].empty?
       end
 
-      if greedy_fallback && best[:packings].size > 1 && check_container_is_bigger_than_greedy_box(container, items)
-        { packings: generate_packing_for_greedy_box(container, items), errors: [] }
+      # the flat stack ignores constraints, so it is only used without them
+      if greedy_fallback && !constrained && best[:packings].size > 1 && check_container_is_bigger_than_greedy_box(container, items)
+        { packings: generate_packing_for_greedy_box(container, items), errors: [],
+          container_dimensions: container[:dimensions].sort.reverse }
       else
         best
       end
+    end
+
+    # Placements in the order to put them in the box: bottom layer first, then from
+    # the back corner. Each gets step: (1, 2, ...) and support: the share of its
+    # bottom resting on the box floor or on items below (1.0 = fully supported).
+    def loading_order(placements)
+      with_steps(placements).sort_by { |pl| pl[:step] }
     end
 
     # Choose boxes from the boxes you have and show how to pack the items in them.
@@ -134,7 +158,7 @@ module EasyBoxPacker
           .select { |_, r| r[:packings].size == 1 && r[:errors].empty? }
           .min_by { |c, _| [c[:cost], volume(c[:container][:dimensions])] }
         if single
-          chosen << box_result(single[0], single[1][:packings].first)
+          chosen << box_result(single[0], single[1])
           break
         end
         unless allow_multiple_boxes
@@ -143,12 +167,12 @@ module EasyBoxPacker
         end
 
         # otherwise fill the box that packs the most item volume per cost, then repeat
-        c, packing = results.map do |cand, r|
-          [cand, r[:packings].max_by { |p| packed_volume(p) }]
-        end.reject { |_, p| p.nil? }.max_by do |cand, p|
+        c, packing, r = results.map do |cand, res|
+          [cand, res[:packings].max_by { |p| packed_volume(p) }, res]
+        end.reject { |_, p, _| p.nil? }.max_by do |cand, p, _|
           [cand[:cost].zero? ? Float::INFINITY : packed_volume(p) / cand[:cost], packed_volume(p), -cand[:cost]]
         end
-        chosen << box_result(c, packing)
+        chosen << box_result(c, r.merge(packings: [packing]))
         packed = packing[:placements].map { |pl| pl[:item] }
         remaining = remaining.reject { |item| packed.any? { |p| p.equal?(item) } }
       end
@@ -232,9 +256,30 @@ module EasyBoxPacker
         .sort_by { |a| [volume(a), a.inject(:+)] }
         .find { |c| fits_in_one?(c, items, pack_options) }
 
+      if constrained?(items)
+        # the flat stack breaks upright / fragile items: fall back to the items in one row
+        return select_container if select_container
+        row = row_box(items)
+        return fits_in_one?(row, items, pack_options) ? row : nil
+      end
+
       # The greedy box (all items laid flat and stacked) always fits.
       greedy_box = item_greedy_box(items)
       prefer_greedy_box?(greedy_box, select_container) ? greedy_box : select_container
+    end
+
+    # All items side by side in one layer (nothing on top of anything), upright ones standing.
+    def row_box(items)
+      sides = items.map do |i|
+        d = i[:dimensions]
+        if i[:upright]
+          w, l = d[0..1].sort
+          [w, l, d[2]]
+        else
+          d.sort
+        end
+      end
+      [sides.sum { |s| s[0] }.round(6), sides.map { |s| s[1] }.max, sides.map { |s| s[2] }.max]
     end
 
     # Every container side is (at most) a sum of item sides, so enumerate sides
@@ -336,13 +381,27 @@ module EasyBoxPacker
       packing[:packings].size == 1 && packing[:errors].empty?
     end
 
-    def box_result(candidate, packing)
+    # result is a #pack result whose first packing is the one used for this box
+    def box_result(candidate, result)
+      packing = result[:packings].first
       {
         box: candidate[:box],
-        placements: packing[:placements],
+        container_dimensions: result[:container_dimensions],
+        placements: with_steps(packing[:placements]),
         weight: packing[:weight],
         cost: candidate[:cost]
       }
+    end
+
+    # placements in their original order, each with step: and support: added
+    def with_steps(placements)
+      order = placements.each_index.sort_by do |i|
+        pos = placements[i][:position]
+        [pos[2].round(6), pos[0].round(6), pos[1].round(6), i]
+      end
+      step = {}
+      order.each_with_index { |i, s| step[i] = s + 1 }
+      placements.each_with_index.map { |pl, i| pl.merge(step: step[i], support: support_ratio(pl, placements)) }
     end
 
     def packed_volume(packing)
@@ -378,10 +437,9 @@ module EasyBoxPacker
     end
 
 
-    def pack_with_strategy(container, items, weight_limit, strategy)
+    def pack_with_strategy(container_dimensions, items, weight_limit, strategy)
       packings = []
       errors   = []
-      container_dimensions = container[:dimensions].sort.reverse
 
       # pack from biggest to smallest
       items.sort_by { |h| valid_dimensions?(h[:dimensions]) ? h[:dimensions].sort.reverse : [] }.reverse.each do |item|
@@ -406,7 +464,7 @@ module EasyBoxPacker
 
           # try minimum space first
           packing[:spaces].sort_by { |h| h[:dimensions].sort }.each do |space|
-            next unless placement = place(item, space)
+            next unless placement = place(item, space, packing[:placements])
             packing[:placements] << placement
             packing[:weight] += item_weight
             packing[:spaces].delete(space)
@@ -435,7 +493,46 @@ module EasyBoxPacker
         }
       end
 
-      { packings: packings, errors: errors }
+      { packings: packings, errors: errors, container_dimensions: container_dimensions }
+    end
+
+    def constrained?(items)
+      items.any? { |i| i.is_a?(Hash) && (i[:upright] || i[:fragile]) }
+    end
+
+    # The container stood on each of its sides: [length, width, up], longest first.
+    def container_frames(dimensions)
+      l, w, h = dimensions.sort.reverse
+      [[l, w, h], [l, h, w], [w, h, l]].uniq
+    end
+
+    def footprint_overlap(a_pos, a_dims, b_pos, b_dims)
+      (0..1).map do |k|
+        [[a_pos[k] + a_dims[k], b_pos[k] + b_dims[k]].min - [a_pos[k], b_pos[k]].max, 0].max
+      end.inject(:*)
+    end
+
+    # true when a box at position/dims would be on top of a fragile item,
+    # or below anything when the item itself is fragile
+    def blocked_by_fragile?(item, position, dims, placements)
+      placements.any? do |pl|
+        next false unless footprint_overlap(position, dims, pl[:position], pl[:dimensions]) > EPSILON
+        top_of_pl   = pl[:position][2] + pl[:dimensions][2]
+        top_of_item = position[2] + dims[2]
+        (pl[:item].is_a?(Hash) && pl[:item][:fragile] && position[2] >= top_of_pl - EPSILON) ||
+          (item[:fragile] && pl[:position][2] >= top_of_item - EPSILON)
+      end
+    end
+
+    def support_ratio(placement, placements)
+      z = placement[:position][2]
+      return 1.0 if z <= EPSILON
+      area = placement[:dimensions][0] * placement[:dimensions][1]
+      supported = placements.sum do |pl|
+        next 0 if pl.equal?(placement) || (pl[:position][2] + pl[:dimensions][2] - z).abs > EPSILON
+        footprint_overlap(placement[:position], placement[:dimensions], pl[:position], pl[:dimensions])
+      end
+      [supported / area.to_f, 1.0].min.round(4)
     end
 
     def validate_container!(container)
@@ -526,7 +623,7 @@ module EasyBoxPacker
       result.map { |a| a.map(&:to_f).sort }
     end
 
-    def place(item, space)
+    def place(item, space, placements = [])
       item_length, item_width, item_height = item[:dimensions].sort.reverse
 
       permutations = [
@@ -537,6 +634,11 @@ module EasyBoxPacker
         [item_length, item_width, item_height],
         [item_length, item_height, item_width]
       ]
+
+      if item[:upright]
+        up = item[:dimensions][2]
+        permutations = permutations.select { |perm| (perm[2] - up).abs <= EPSILON }
+      end
 
       possible_rotations_and_margins = []
 
@@ -549,7 +651,9 @@ module EasyBoxPacker
       end
 
       # select rotation with smallest margin
-      final = possible_rotations_and_margins.sort_by { |a| a[:margin].sort }.first
+      ranked = possible_rotations_and_margins.sort_by { |a| a[:margin].sort }
+      check_fragile = item[:fragile] || placements.any? { |pl| pl[:item].is_a?(Hash) && pl[:item][:fragile] }
+      final = check_fragile ? ranked.find { |a| !blocked_by_fragile?(item, space[:position], a[:rotation], placements) } : ranked.first
       return unless final
       {
         dimensions: final[:rotation],
