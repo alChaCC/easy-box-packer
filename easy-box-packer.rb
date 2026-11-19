@@ -1,119 +1,195 @@
 module EasyBoxPacker
+  # Tolerance for floating point comparisons (e.g. 0.1 + 0.2 vs 0.3).
+  EPSILON = 1e-9
+
+  # Ways of choosing how the free space around a placement is split.
+  # :legacy is the original heuristic and is always tried first so results
+  # that already fit in one container are unchanged; the others are only
+  # tried when :legacy needs more than one container.
+  SPLIT_STRATEGIES = [:legacy, :max_space, 0, 1, 2, 3, 4, 5].freeze
+
+  # Number of candidates kept at each step of the smallest container search.
+  # 1 reproduces the original search (follow the most cube-like candidate).
+  SEARCH_BEAM_WIDTH = 1
+
   class << self
+    # All placements are expressed in the container's frame with its
+    # dimensions sorted descending (length >= width >= height).
     def pack(container:, items:)
+      validate_container!(container)
+      weight_limit = weight_limit_of(container)
+
+      best = nil
+      SPLIT_STRATEGIES.each do |strategy|
+        result = pack_with_strategy(container, items, weight_limit, strategy)
+        best = result if best.nil? || result[:packings].size < best[:packings].size
+        break if best[:packings].size <= 1
+      end
+
+      if best[:packings].size > 1 && check_container_is_bigger_than_greedy_box(container, items)
+        { packings: generate_packing_for_greedy_box(container, items), errors: [] }
+      else
+        best
+      end
+    end
+
+    def find_smallest_container(items:)
+      raise ArgumentError, 'items must not be empty' if items.nil? || items.empty?
+      items.each do |item|
+        raise ArgumentError, "invalid dimensions for item: #{item}" unless valid_dimensions?(item[:dimensions])
+      end
+
+      # order items from biggest to smallest
+      sorted_items = items.sort_by { |h| h[:dimensions].sort }.reverse
+      return normalize(sorted_items.first[:dimensions]) if sorted_items.size == 1
+
+      min_vol = items.map { |h| h[:dimensions].inject(:*) }.inject(:+)
+      possible_containers = find_possible_containers(
+        container: sorted_items.first[:dimensions],
+        items: sorted_items.map { |i| i[:dimensions] },
+        min_vol: min_vol
+      )
+
+      select_container = possible_containers
+        .sort_by { |a| [volume(a), a.inject(:+)] }
+        .find do |c|
+          packing = pack(container: { dimensions: c }, items: items)
+          packing[:packings].size == 1 && packing[:errors].empty?
+        end
+
+      # The greedy box (all items laid flat and stacked) always fits.
+      greedy_box = item_greedy_box(items)
+      normalize(prefer_greedy_box?(greedy_box, select_container) ? greedy_box : select_container)
+    end
+
+    private
+
+    def pack_with_strategy(container, items, weight_limit, strategy)
       packings = []
       errors   = []
+      container_dimensions = container[:dimensions].sort.reverse
+
       # pack from biggest to smallest
-      items.sort_by { |h| h[:dimensions].sort.reverse }.reverse.each do |item|
-        # If the item is just too big for the container lets give up on this
-        if item[:weight].to_f > container[:weight_limit].to_f
+      items.sort_by { |h| valid_dimensions?(h[:dimensions]) ? h[:dimensions].sort.reverse : [] }.reverse.each do |item|
+        unless valid_dimensions?(item[:dimensions])
+          errors << "Item: #{item} has invalid dimensions"
+          next
+        end
+
+        item_weight = item[:weight].to_f
+        # If the item is just too heavy for the container lets give up on this
+        if item_weight > weight_limit
           errors << "Item: #{item} is too heavy for container"
           next
         end
 
-        # Need a bool so we can break out nested loops once it's been packed
         item_has_been_packed = false
 
         packings.each do |packing|
-          # If this packings going to be too big with this
+          # If this packing is going to be too heavy with this
           # item as well then skip on to the next packing
-          next if packing[:weight].to_f + item[:weight].to_f > container[:weight_limit].to_f
+          next if packing[:weight] + item_weight > weight_limit + EPSILON
 
-          # remove volume size = 0 (not possible to pack)
-          packing[:spaces].reject! { |space| space[:dimensions].inject(:*) == 0 }
           # try minimum space first
           packing[:spaces].sort_by { |h| h[:dimensions].sort }.each do |space|
-            # Try placing the item in this space,
-            # if it doesn't fit skip on the next space
             next unless placement = place(item, space)
-            # Add the item to the packing and
-            # break up the surrounding spaces
-            packing[:placements] += [placement]
-            packing[:weight] += item[:weight].to_f
-            packing[:spaces] -= [space]
-            packing[:spaces] += break_up_space(space, placement)
+            packing[:placements] << placement
+            packing[:weight] += item_weight
+            packing[:spaces].delete(space)
+            packing[:spaces].concat(break_up_space(space, placement, strategy))
             item_has_been_packed = true
             break
           end
           break if item_has_been_packed
         end
         next if item_has_been_packed
+
         # Can't fit in any of the spaces for the current packings
         # so lets try a new space the size of the container
-        space = {
-          dimensions: container[:dimensions].sort.reverse,
-          position: [0, 0, 0]
-        }
+        space = { dimensions: container_dimensions, position: [0, 0, 0] }
         placement = place(item, space)
 
-        # If it can't be placed in this space, then it's just
-        # too big for the container and we should abandon hope
         unless placement
           errors << "Item: #{item} cannot be placed in container"
           next
         end
-        # Otherwise lets put the item in a new packing
-        # and break up the remaing free space around it
-        packings += [{
+
+        packings << {
           placements: [placement],
-          weight: item[:weight].to_f,
-          spaces: break_up_space(space, placement)
-        }]
+          weight: item_weight,
+          spaces: break_up_space(space, placement, strategy)
+        }
       end
 
-      if packings.size > 1 && check_container_is_bigger_than_greedy_box(container, items)
-        { packings: generate_packing_for_greedy_box(items), errors: [] }
-      else
-        { packings: packings, errors: errors }
+      { packings: packings, errors: errors }
+    end
+
+    def validate_container!(container)
+      unless container.is_a?(Hash) && valid_dimensions?(container[:dimensions])
+        raise ArgumentError, "invalid container dimensions: #{container.inspect}"
       end
     end
 
-    def find_smallest_container(items:)
-      possible_containers = []
-      invalid_containers  = []
-
-      min_vol = items.map { |h| h[:dimensions].inject(&:*) }.inject(&:+)
-      # order items from biggest to smallest
-      sorted_items = items.sort_by { |h| h[:dimensions].sort }.reverse
-
-      # base_container = sorted_items.first
-      based_container = sorted_items.first
-
-      if sorted_items.size == 1
-        return based_container[:dimensions]
-      end
-
-      find_possible_container(
-        possible_containers: possible_containers,
-        invalid_containers: invalid_containers,
-        container: based_container[:dimensions],
-        items: sorted_items.map {|i| i[:dimensions]},
-        item_index: 1,
-        min_vol: min_vol)
-
-      select_container = possible_containers.map { |a| a.sort }.sort_by { |a| [a.inject(&:*), a.inject(&:+)] }.each do |c|
-        packing = pack(
-          container: { dimensions: c },
-          items: items)
-        break c if packing[:packings].size == 1 && packing[:errors].size == 0
-      end
-      check_container_is_bigger_than_greedy_box({dimensions: select_container}, items) ? item_greedy_box(items) : select_container
+    def valid_dimensions?(dimensions)
+      dimensions.is_a?(Array) && dimensions.size == 3 &&
+        dimensions.all? { |d| d.is_a?(Numeric) && d.finite? && d > 0 }
     end
 
-    private
+    def weight_limit_of(container)
+      # No weight_limit means no weight restriction.
+      container[:weight_limit].nil? ? Float::INFINITY : container[:weight_limit].to_f
+    end
+
+    # Containers are returned as floats sorted ascending, e.g. [2.0, 2.0, 3.0].
+    def normalize(dimensions)
+      dimensions.map(&:to_f).sort
+    end
+
+    def aspect_ratio(dimensions)
+      dimensions.max.to_f / dimensions.min
+    end
+
+    # Use the greedy box when nothing else was found, when it fits inside the
+    # selected container, or when it is both smaller and no more elongated.
+    def prefer_greedy_box?(greedy_box, selected)
+      return true if selected.nil?
+      g = greedy_box.sort
+      s = selected.sort
+      return true if (0..2).all? { |i| s[i] + EPSILON >= g[i] }
+      volume(g) <= volume(s) + EPSILON && aspect_ratio(g) <= aspect_ratio(s) + EPSILON
+    end
+
+    def volume(dimensions)
+      dimensions.inject(:*)
+    end
 
     def std(contents)
       n = contents.size
-      contents.map!(&:to_f)
-      mean = contents.reduce(&:+)/n
-      sum_sqr = contents.map {|x| x * x}.reduce(&:+)
-      Math.sqrt(((sum_sqr - n * mean * mean)/(n-1)).abs)
+      values = contents.map(&:to_f)
+      mean = values.sum / n
+      sum_sqr = values.map { |x| x * x }.sum
+      Math.sqrt(((sum_sqr - n * mean * mean) / (n - 1)).abs)
     end
 
-    def find_possible_container(possible_containers:,invalid_containers:,container:, items:, item_index:, min_vol:)
-      return unless items[item_index]
+    # Grow a container by adding items one at a time on each face, keeping
+    # the most "cube like" and the smallest candidates at each step (beam search).
+    def find_possible_containers(container:, items:, min_vol:)
+      possible_containers = []
+      frontier = [container.sort]
+
+      items.drop(1).each do |item|
+        candidates = frontier.flat_map { |c| grow_container(c, item) }.uniq
+        candidates.each { |c| possible_containers << c if volume(c) >= min_vol }
+
+        frontier = candidates.sort_by { |a| [std(a), volume(a), a.inject(:+)] }.first(SEARCH_BEAM_WIDTH)
+      end
+
+      possible_containers.uniq
+    end
+
+    def grow_container(container, item)
       c_length, c_width, c_height = container.sort.reverse
-      b_length, b_width, b_height = items[item_index].sort.reverse
+      b_length, b_width, b_height = item.sort.reverse
       c_permutations = [
         [c_width,  c_height, c_length],
         [c_length, c_width,  c_height],
@@ -125,35 +201,15 @@ module EasyBoxPacker
         [b_length, b_height, b_width]
       ]
 
-      tmp_possible_containers = []
-      # (1) loops base_container 3 rotations
+      result = []
       c_permutations.each do |c_perm|
-        # (2) try to puts items to 3 points, then it will create 3 different possible containers
         b_permutations.each do |b_perm|
-          tmp_possible_containers << [  c_perm[0] + b_perm[0],     [c_perm[1], b_perm[1]].max, [c_perm[2], b_perm[2]].max]
-          tmp_possible_containers << [ [c_perm[0], b_perm[0]].max,  c_perm[1] + b_perm[1],     [c_perm[2], b_perm[2]].max]
-          tmp_possible_containers << [ [c_perm[0], b_perm[0]].max, [c_perm[1], b_perm[1]].max,  c_perm[2]+ b_perm[2]]
+          result << [ c_perm[0] + b_perm[0],     [c_perm[1], b_perm[1]].max, [c_perm[2], b_perm[2]].max]
+          result << [[c_perm[0], b_perm[0]].max,  c_perm[1] + b_perm[1],     [c_perm[2], b_perm[2]].max]
+          result << [[c_perm[0], b_perm[0]].max, [c_perm[1], b_perm[1]].max,  c_perm[2] + b_perm[2]]
         end
       end
-      removed_tried_container = tmp_possible_containers.map { |a| a.sort }.uniq - possible_containers - invalid_containers
-
-      return unless removed_tried_container.any?
-      # (3) loop all container from smallest spaces to biggest space
-      removed_tried_container.sort_by { |a| [a.inject(&:*), a.inject(&:+)] }.each do |cont|
-        # (4) next unless l * w * h >= minimum_space
-        if cont.inject(&:*) >= min_vol
-          possible_containers << cont
-        # else
-          # puts "invalid: #{cont}"
-          # invalid_containers << cont
-          # find_possible_container(possible_containers: possible_containers, invalid_containers: invalid_containers, container: cont, items: items, item_index: item_index + 1, min_vol: min_vol)
-        end
-      end
-      # minimum_space = (removed_tried_container).sort_by { |a| [a.inject(&:*), a.inject(&:+)] }.first
-      minimum_std = removed_tried_container.sort_by { |a| [std(a), a.inject(&:*), a.inject(&:+)] }.first
-      [minimum_std].uniq.compact.each do |cont|
-        find_possible_container(possible_containers: possible_containers, invalid_containers: invalid_containers, container: cont, items: items, item_index: item_index + 1, min_vol: min_vol)
-      end
+      result.map { |a| a.map(&:to_f).sort }
     end
 
     def place(item, space)
@@ -172,26 +228,39 @@ module EasyBoxPacker
 
       permutations.each do |perm|
         # Skip if the item does not fit with this orientation
-        next unless perm[0] <= space[:dimensions][0] &&
-          perm[1] <= space[:dimensions][1] &&
-          perm[2] <= space[:dimensions][2]
+        next unless (0..2).all? { |i| perm[i] <= space[:dimensions][i] + EPSILON }
 
-        possible_margin   = [space[:dimensions][0] - perm[0], space[:dimensions][1] - perm[1], space[:dimensions][2] - perm[2]]
+        possible_margin = (0..2).map { |i| space[:dimensions][i] - perm[i] }
         possible_rotations_and_margins << { margin: possible_margin, rotation: perm }
       end
 
       # select rotation with smallest margin
       final = possible_rotations_and_margins.sort_by { |a| a[:margin].sort }.first
       return unless final
-      return {
+      {
         dimensions: final[:rotation],
         position: space[:position],
         weight: item[:weight].to_f
       }
     end
 
-    def break_up_space(space, placement)
-      return_possible_spaces = [
+    def break_up_space(space, placement, strategy = :legacy)
+      options = split_options(space, placement)
+      # original heuristic: compare the sorted dimensions of each option's spaces
+      ranked = options.sort_by { |a| a.map { |aa| aa[:dimensions].sort } }
+      chosen =
+        case strategy
+        when :legacy    then ranked.last
+        # keep the largest single free block; ties fall back to :legacy order
+        when :max_space then ranked.reverse.max_by { |a| a.map { |aa| volume(aa[:dimensions]) }.max }
+        else options[strategy]
+        end
+      # drop empty (zero / float-noise) spaces, they can never hold anything
+      chosen.reject { |s| s[:dimensions].any? { |d| d <= EPSILON } }
+    end
+
+    def split_options(space, placement)
+      [
         # HEIGHT SPACE => WIDTH  => LENGTH
         [
           {
@@ -427,31 +496,44 @@ module EasyBoxPacker
           }
         ]
       ]
-      # PICK biggest
-      return_possible_spaces.sort_by { |a| a.map {|aa| aa[:dimensions].sort}}.last
     end
 
+    # Smallest box that holds every item laid flat and stacked on top of each other.
     def item_greedy_box(items)
-      array_of_lwh            = items.map { |i| i[:dimensions].sort.reverse }
-      items_max_length        = array_of_lwh.max { |x, y| x[0] <=> y[0] }[0]
-      items_max_width         = array_of_lwh.max { |x, y| x[1] <=> y[1] }[1]
-      items_total_height      = array_of_lwh.inject(0) { |sum, x| sum+=x[2] }.round(1)
+      array_of_lwh       = items.map { |i| i[:dimensions].sort.reverse }
+      items_max_length   = array_of_lwh.map { |x| x[0] }.max
+      items_max_width    = array_of_lwh.map { |x| x[1] }.max
+      # round only to remove float noise (e.g. 20.099999999999998), never truncate real size
+      items_total_height = array_of_lwh.map { |x| x[2] }.sum.round(6)
       [items_max_length, items_max_width, items_total_height]
     end
 
     def check_container_is_bigger_than_greedy_box(container, items)
       c = container[:dimensions].sort.reverse
-      greedy_box = item_greedy_box(items)
-      c[0] >= greedy_box[0] && c[1] >= greedy_box[1] && c[2] >= greedy_box[2] && container[:weight_limit].to_f >= items.inject(0) { |sum, i| sum += i[:weight].to_f }
+      greedy_box = item_greedy_box(items).sort.reverse
+      (0..2).all? { |i| c[i] + EPSILON >= greedy_box[i] } &&
+        weight_limit_of(container) + EPSILON >= items.sum { |i| i[:weight].to_f }
     end
 
-    def generate_packing_for_greedy_box(items)
-      return_h = {placements: [], weight: 0, spaces: []}
+    # Stack items flat along the greedy box's height, then map the result into
+    # the container's frame (dimensions sorted descending) like #pack does.
+    def generate_packing_for_greedy_box(container, items)
+      greedy_box = item_greedy_box(items)
+      # axis_map[k] = greedy box axis that lies along container axis k
+      axis_map = [0, 1, 2].sort_by { |i| [-greedy_box[i], i] }
+
+      return_h = { placements: [], weight: 0.0, spaces: [] }
       height   = 0
       items.each do |i|
-        return_h[:placements] << { dimensions: i[:dimensions], :position=>[0, 0, height], weight: i[:weight].to_f }
+        dims     = i[:dimensions].sort.reverse
+        position = [0, 0, height]
+        return_h[:placements] << {
+          dimensions: axis_map.map { |a| dims[a] },
+          position: axis_map.map { |a| position[a] },
+          weight: i[:weight].to_f
+        }
         return_h[:weight] += i[:weight].to_f
-        height += i[:dimensions].sort.first.to_f
+        height += dims[2]
       end
       [return_h]
     end

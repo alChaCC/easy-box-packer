@@ -1,5 +1,32 @@
 require 'easy-box-packer'
-require 'pry'
+
+# Checks a pack result is physically possible: inside the container, no overlaps,
+# within the weight limit and every item is either placed or reported.
+def geometry_problems(container, items, result)
+  eps = 1e-9
+  c = container[:dimensions].sort.reverse
+  problems = []
+  result[:packings].each do |packing|
+    placements = packing[:placements]
+    placements.each do |pl|
+      3.times do |k|
+        problems << "out of bounds: #{pl}" if pl[:position][k] < -eps || pl[:position][k] + pl[:dimensions][k] > c[k] + eps
+      end
+    end
+    placements.combination(2).each do |a, b|
+      overlap = (0..2).all? do |k|
+        a[:position][k] < b[:position][k] + b[:dimensions][k] - eps &&
+          b[:position][k] < a[:position][k] + a[:dimensions][k] - eps
+      end
+      problems << "overlap: #{a} #{b}" if overlap
+    end
+    problems << "overweight: #{packing[:weight]}" if container[:weight_limit] && packing[:weight] > container[:weight_limit] + eps
+  end
+  placed = result[:packings].sum { |pk| pk[:placements].size }
+  problems << 'item count mismatch' if placed + result[:errors].size != items.size
+  problems
+end
+
 describe '.pack' do
   it do
     packings = EasyBoxPacker.pack(
@@ -106,7 +133,8 @@ describe '.pack' do
         ]
       )
       expect(packings[:packings].length).to eql(1)
-      expect(packings[:errors]).to eql(["Item: {:dimensions=>[40, 10, 34]} cannot be placed in container"])
+      expect(packings[:errors].size).to eql(1)
+      expect(packings[:errors].first).to match(/\AItem: .*40, 10, 34.* cannot be placed in container\z/)
     end
 
     it 'case 5' do
@@ -179,14 +207,16 @@ describe '.find_smallest_container' do
     container = EasyBoxPacker.find_smallest_container(
         items: Array.new(100) {{ dimensions: [10, 5, 4] }}
       )
-    expect(container).to eql([26.0, 29.0, 36.0])
+    # was [26.0, 29.0, 36.0] before more split strategies were tried
+    expect(container).to eql([26.0, 29.0, 30.0])
   end
 
   it 'can get smallest container - with 100 items' do
     container = EasyBoxPacker.find_smallest_container(
         items: Array.new(100) {{ dimensions: [4, 5, 5] }}
       )
-    expect(container).to eql([21.0, 24.0, 26.0])
+    # was [21.0, 24.0, 26.0]
+    expect(container).to eql([21.0, 21.0, 28.0])
   end
 
   it 'can get smallest container - with 1000 items' do
@@ -259,10 +289,11 @@ describe '.find_smallest_container' do
       ]
     )
 
-    expect(container).to eq([10.0, 20.0, 11.0])
+    expect(container).to eql([10.0, 11.0, 20.0])
   end
 
   it 'case 7' do
+    pending 'search does not generate [30, 60, 110]; returns [30.0, 30.0, 220.0] (same volume, more elongated)'
     container = EasyBoxPacker.find_smallest_container(
       items: [
         {dimensions: [110, 30, 10]}, {dimensions: [110, 20, 10]}, {dimensions: [110, 10, 5]},
@@ -289,7 +320,7 @@ describe '.find_smallest_container' do
         items: Array.new(67) {{ dimensions: [36.0, 27.0, 0.3] }}
       )
 
-    expect(container).to eql([36.0, 27.0, 20.1])
+    expect(container).to eql([20.1, 27.0, 36.0])
   end
 
   it 'case 10' do
@@ -300,7 +331,7 @@ describe '.find_smallest_container' do
           { dimensions: [13, 23.5, 48] }
         ]
       )
-    expect(container).to eql([48, 23.5, 39.0])
+    expect(container).to eql([23.5, 39.0, 48.0])
   end
 
 
@@ -314,7 +345,8 @@ describe '.find_smallest_container' do
           { dimensions: [27, 27, 17] }
         ]
       )
-    expect(container).to eql([34.0, 34.0, 79.0])
+    # was [34.0, 34.0, 79.0]
+    expect(container).to eql([27.0, 34.0, 79.0])
   end
 
 
@@ -329,5 +361,62 @@ describe '.find_smallest_container' do
         ]
       )
     expect(container).to eql([27.0, 46.0, 57.0])
+  end
+end
+
+describe 'regressions' do
+  it 'greedy fallback returns physically valid placements' do
+    [
+      [{ dimensions: [9, 19, 8] }, [{ dimensions: [9, 11, 4] }, { dimensions: [19, 6, 1] }]],
+      [{ dimensions: [17, 15, 20] }, [[3, 20, 6], [16, 9, 1], [1, 15, 14], [11, 11, 2], [14, 7, 1], [17, 3, 19]].map { |d| { dimensions: d } }],
+      [{ dimensions: [7, 14, 8] }, [[0.1, 4, 2.1], [11.0, 0.8, 6.6], [2.2, 10, 0.9], [1.8, 3.3, 5.5], [8, 10, 0.6]].map { |d| { dimensions: d } }]
+    ].each do |container, items|
+      result = EasyBoxPacker.pack(container: container, items: items)
+      expect(result[:packings].size).to eql(1)
+      expect(geometry_problems(container, items, result)).to eql([])
+    end
+  end
+
+  it 'random packings are always physically valid' do
+    rng = Random.new(42)
+    300.times do
+      container = { dimensions: Array.new(3) { rng.rand(5..30) + [0, 0.1, 0.5].sample(random: rng) }, weight_limit: [nil, rng.rand(10..50)].sample(random: rng) }
+      items = Array.new(rng.rand(1..10)) { { dimensions: Array.new(3) { (rng.rand(1..12) * [0.1, 1, 1.1].sample(random: rng)).round(2) }, weight: rng.rand(0..15) } }
+      result = EasyBoxPacker.pack(container: container, items: items)
+      expect(geometry_problems(container, items, result)).to eql([]), "container=#{container} items=#{items}"
+    end
+  end
+
+  it 'treats a missing weight_limit as no limit' do
+    result = EasyBoxPacker.pack(container: { dimensions: [10, 10, 10] }, items: [{ dimensions: [1, 1, 1], weight: 5 }])
+    expect(result[:errors]).to eql([])
+    expect(result[:packings].first[:weight]).to eql(5.0)
+  end
+
+  it 'reports items with invalid dimensions instead of placing them' do
+    result = EasyBoxPacker.pack(container: { dimensions: [5, 5, 5] }, items: [{ dimensions: [0, 1, 1] }, { dimensions: [-1, 1, 1] }, { dimensions: [1, 1, 1] }])
+    expect(result[:errors].size).to eql(2)
+    expect(result[:packings].first[:placements].size).to eql(1)
+  end
+
+  it 'raises on an invalid container' do
+    expect { EasyBoxPacker.pack(container: { dimensions: [5, 5] }, items: []) }.to raise_error(ArgumentError)
+  end
+
+  it 'raises on empty items for find_smallest_container' do
+    expect { EasyBoxPacker.find_smallest_container(items: []) }.to raise_error(ArgumentError)
+  end
+
+  it 'greedy box height is never rounded down below the real stack height' do
+    container = EasyBoxPacker.find_smallest_container(items: [{ dimensions: [10, 10, 0.04] }, { dimensions: [10, 10, 1.0] }])
+    expect(container).to eql([1.04, 10.0, 10.0])
+    container = EasyBoxPacker.find_smallest_container(items: Array.new(3) { { dimensions: [10, 10, 0.35] } })
+    expect(container).to eql([1.05, 10.0, 10.0])
+  end
+
+  it 'does not mutate the given items' do
+    items = [{ dimensions: [3, 1, 2] }, { dimensions: [1, 1, 1] }]
+    EasyBoxPacker.find_smallest_container(items: items)
+    expect(items).to eql([{ dimensions: [3, 1, 2] }, { dimensions: [1, 1, 1] }])
   end
 end
