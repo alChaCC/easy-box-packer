@@ -64,8 +64,41 @@ container = EasyBoxPacker.find_smallest_container(
 container # [10.0, 10.0, 10.0]
 ```
 
-The result is always floats sorted ascending. It is a heuristic: a reasonably
-shaped small container, not a proven minimum.
+All sizes are in **cm**. The result is always floats sorted ascending, or `nil`
+when no container satisfies the limits below. It is a heuristic: a small
+container, not a proven minimum.
+
+It works in two steps:
+
+1. A quick heuristic that grows a container item by item.
+2. A refining search over side lengths built from sums of item sides, which keeps
+   the best container found until `time_limit` runs out. It is never worse than step 1.
+
+```ruby
+EasyBoxPacker.find_smallest_container(
+  items: items,
+  time_limit: 0.5,              # seconds (default 0.5). nil = no limit, 0 = step 1 only
+  max_attempts: nil,            # max candidates test-packed; same result on every machine
+  max_length: 120,              # longest side allowed (cm), e.g. your carrier's limit
+  max_length_plus_girth: 300,   # length + 2 * (width + height) allowed (cm)
+  cost: nil                     # custom cost, see below
+)
+```
+
+`time_limit` is a soft limit for the whole call: step 1 always finishes, and
+the test pack already running when the time runs out also finishes.
+
+By default the cheapest container is the one with the smallest volume, then the
+smallest length + girth. Carriers charge on dimensional weight (volume) plus
+surcharges for long parcels, so pass your own `cost` to model your carrier.
+It receives `[a, b, c]` in cm (sorted ascending), returns anything comparable
+(lower is better), and must not decrease when a side grows:
+
+```ruby
+# dimensional weight (divisor 5000) + a surcharge when the longest side is over 60 cm
+cost = ->(d) { (d.inject(:*) / 5000.0).ceil + (d.max > 60 ? 20 : 0) }
+EasyBoxPacker.find_smallest_container(items: items, cost: cost)
+```
 
 ## Development
 
@@ -75,6 +108,13 @@ bundle exec rspec easy-box-packer_spec.rb
 ```
 
 ## Changelog
+
+### 0.2.0
+
+- `find_smallest_container` refines its first answer with a search over side lengths,
+  e.g. case 7 goes from 30 x 30 x 220 to 30 x 55 x 110 (smaller and much shorter).
+- New options: `time_limit`, `max_attempts`, `max_length`, `max_length_plus_girth`, `cost`.
+- Sizes are documented as cm.
 
 ### 0.1.0
 

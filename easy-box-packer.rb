@@ -12,6 +12,12 @@ module EasyBoxPacker
   # 1 reproduces the original search (follow the most cube-like candidate).
   SEARCH_BEAM_WIDTH = 1
 
+  # Default seconds find_smallest_container spends refining its first answer.
+  DEFAULT_TIME_LIMIT = 0.5
+
+  # Max distinct side lengths tried per axis while refining.
+  MAX_SIDE_VALUES = 1000
+
   class << self
     # All placements are expressed in the container's frame with its
     # dimensions sorted descending (length >= width >= height).
@@ -33,15 +39,52 @@ module EasyBoxPacker
       end
     end
 
-    def find_smallest_container(items:)
+    # Find a small container (dimensions in cm, floats sorted ascending) that holds all items.
+    #
+    # time_limit            - soft limit in seconds for the whole call (default 0.5): no new
+    #                         candidate is tried after it, the first heuristic answer is always
+    #                         computed. nil = no time limit, 0 = skip refining (0.1.0 behaviour).
+    # max_attempts          - max number of candidate containers test-packed while refining.
+    #                         Unlike time_limit it gives the same result on every machine. nil = no limit.
+    # max_length            - longest side allowed (cm), e.g. a carrier limit.
+    # max_length_plus_girth - max length + 2 * (width + height) allowed (cm).
+    # cost                  - lambda taking [a, b, c] (sorted ascending, cm) and returning a Comparable,
+    #                         lower is better. It must not decrease when a side grows.
+    #                         Default: [volume, length + girth].
+    #
+    # Returns nil when no container satisfies max_length / max_length_plus_girth.
+    def find_smallest_container(items:, time_limit: DEFAULT_TIME_LIMIT, max_attempts: nil,
+                                max_length: nil, max_length_plus_girth: nil, cost: nil)
       raise ArgumentError, 'items must not be empty' if items.nil? || items.empty?
       items.each do |item|
         raise ArgumentError, "invalid dimensions for item: #{item}" unless valid_dimensions?(item[:dimensions])
       end
+      validate_non_negative!(:time_limit, time_limit)
+      validate_non_negative!(:max_attempts, max_attempts)
+      validate_non_negative!(:max_length, max_length)
+      validate_non_negative!(:max_length_plus_girth, max_length_plus_girth)
+      raise ArgumentError, 'cost must respond to #call' if cost && !cost.respond_to?(:call)
 
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      limits = { max_length: max_length, max_length_plus_girth: max_length_plus_girth }
+      start = heuristic_smallest_container(items)
+      start = nil unless within_limits?(start, limits)
+      return start && normalize(start) if items.size == 1
+
+      best = refine_container(
+        items, start,
+        deadline: time_limit && started_at + time_limit, max_attempts: max_attempts, limits: limits, cost: cost
+      )
+      best && normalize(best)
+    end
+
+    private
+
+    # Original search: grow a container item by item, then compare with the greedy box.
+    def heuristic_smallest_container(items)
       # order items from biggest to smallest
       sorted_items = items.sort_by { |h| h[:dimensions].sort }.reverse
-      return normalize(sorted_items.first[:dimensions]) if sorted_items.size == 1
+      return sorted_items.first[:dimensions] if sorted_items.size == 1
 
       min_vol = items.map { |h| h[:dimensions].inject(:*) }.inject(:+)
       possible_containers = find_possible_containers(
@@ -52,17 +95,130 @@ module EasyBoxPacker
 
       select_container = possible_containers
         .sort_by { |a| [volume(a), a.inject(:+)] }
-        .find do |c|
-          packing = pack(container: { dimensions: c }, items: items)
-          packing[:packings].size == 1 && packing[:errors].empty?
-        end
+        .find { |c| fits_in_one?(c, items) }
 
       # The greedy box (all items laid flat and stacked) always fits.
       greedy_box = item_greedy_box(items)
-      normalize(prefer_greedy_box?(greedy_box, select_container) ? greedy_box : select_container)
+      prefer_greedy_box?(greedy_box, select_container) ? greedy_box : select_container
     end
 
-    private
+    # Every container side is (at most) a sum of item sides, so enumerate sides
+    # (a <= b <= c) from those sums and test-pack candidates that would be cheaper
+    # than the best one found so far. Starts from `best` so it is never worse.
+    def refine_container(items, best, deadline:, max_attempts:, limits:, cost:)
+      return best if max_attempts == 0
+      return best if deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      cost_of  = cost || method(:default_cost)
+
+      sorted = items.map { |i| i[:dimensions].sort }
+      min_a, min_b, min_c = (0..2).map { |k| sorted.map { |d| d[k] }.max }
+      min_vol = sorted.sum { |d| volume(d) }
+
+      best      = best && best.map(&:to_f).sort
+      best_cost = best && cost_of.call(best)
+      beats_best = ->(dims) { best.nil? || (cost_of.call(dims) <=> best_cost) < 0 }
+
+      # longest side worth trying: stacking every item end to end always fits,
+      # and a longer side can not beat the best cost found so far
+      cap = sorted.sum { |d| d[2] }
+      cap = [cap, limits[:max_length]].min if limits[:max_length]
+      cap = largest_side_beating(cap, min_a, min_b, min_c, beats_best) if best
+      values = side_values(sorted, cap)
+      attempts = 0
+
+      # Try the smallest side closest to a cube first, so that when the time limit
+      # stops the search early the answer is compact rather than long and thin.
+      cube_side = Math.cbrt(min_vol)
+      a_values  = values.select { |a| a >= min_a - EPSILON }.sort_by { |a| [(a - cube_side).abs, a] }
+
+      # cost never decreases when a side grows, so cost(a, b, c) with the smallest
+      # sides still allowed is a lower bound for the remaining loop iterations
+      a_values.each do |a|
+        next unless beats_best.call([a, [a, min_b].max, [a, min_b, min_c].max])
+        values.each do |b|
+          next if b < [a, min_b].max - EPSILON
+          break unless beats_best.call([a, b, [b, min_c].max])
+          values.each do |c|
+            next if c < [b, min_c].max - EPSILON || a * b * c < min_vol - EPSILON
+            candidate = [a, b, c]
+            # c only grows from here, so neither limits nor cost can get better
+            break unless within_limits?(candidate, limits)
+            break unless beats_best.call(candidate)
+
+            return best if deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+            return best if max_attempts && attempts >= max_attempts
+            attempts += 1
+            next unless fits_in_one?(candidate, items)
+
+            best, best_cost = candidate, cost_of.call(candidate)
+            break
+          end
+        end
+      end
+      best
+    end
+
+    # Binary search the largest c in [min_c, cap] for which [min_a, min_b, c] still beats the best.
+    def largest_side_beating(cap, min_a, min_b, min_c, beats_best)
+      return min_c unless beats_best.call([min_a, min_b, min_c].sort)
+      lo, hi = min_c.to_f, cap.to_f
+      40.times do
+        mid = (lo + hi) / 2
+        beats_best.call([min_a, min_b, mid].sort) ? lo = mid : hi = mid
+      end
+      [hi, cap].min
+    end
+
+    # Possible container side lengths: subset sums of item sides up to `cap`.
+    # When there are too many (lots of different float sizes) they are rounded up
+    # to a grid, which only makes candidates slightly bigger, never invalid.
+    def side_values(sorted_dims, cap)
+      sums = { 0.0 => true }
+      grid = nil
+      sorted_dims.flatten.each do |d|
+        sums.keys.each do |v|
+          nv = v + d
+          next if nv > cap + EPSILON
+          nv = grid ? ((nv / grid).ceil * grid) : nv
+          sums[nv.round(6)] = true
+        end
+        if !grid && sums.size > MAX_SIDE_VALUES * 10
+          grid = cap / MAX_SIDE_VALUES
+          sums = sums.keys.map { |v| ((v / grid).ceil * grid).round(6) }.uniq.map { |v| [v, true] }.to_h
+        end
+      end
+      values = sums.keys.reject(&:zero?).sort
+      # keep the search bounded: at most MAX_SIDE_VALUES values spread over the range
+      values = values.each_slice((values.size.to_f / MAX_SIDE_VALUES).ceil).map(&:first) if values.size > MAX_SIDE_VALUES
+      values
+    end
+
+    def fits_in_one?(dimensions, items)
+      packing = pack(container: { dimensions: dimensions }, items: items)
+      packing[:packings].size == 1 && packing[:errors].empty?
+    end
+
+    def length_plus_girth(dimensions)
+      a, b, c = dimensions.sort
+      c + 2 * (a + b)
+    end
+
+    def default_cost(dimensions)
+      [volume(dimensions).round(6), length_plus_girth(dimensions).round(6)]
+    end
+
+    def within_limits?(dimensions, limits)
+      return false if dimensions.nil?
+      return false if limits[:max_length] && dimensions.max > limits[:max_length] + EPSILON
+      return false if limits[:max_length_plus_girth] && length_plus_girth(dimensions) > limits[:max_length_plus_girth] + EPSILON
+      true
+    end
+
+    def validate_non_negative!(name, value)
+      return if value.nil?
+      raise ArgumentError, "#{name} must be a non-negative number" unless value.is_a?(Numeric) && value >= 0
+    end
+
 
     def pack_with_strategy(container, items, weight_limit, strategy)
       packings = []
