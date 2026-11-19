@@ -514,3 +514,130 @@ describe 'regressions' do
     expect(items).to eql([{ dimensions: [3, 1, 2] }, { dimensions: [1, 1, 1] }])
   end
 end
+
+BOXES = [
+  { id: 'S', dimensions: [20, 15, 10], weight_limit: 5,  cost: 10 },
+  { id: 'M', dimensions: [30, 25, 20], weight_limit: 10, cost: 18 },
+  { id: 'L', dimensions: [45, 35, 30], weight_limit: 20, cost: 30 }
+].freeze
+
+def placed_ids(result)
+  result[:boxes].flat_map { |b| b[:placements].map { |p| p[:item][:id] } }
+end
+
+def expect_valid_boxes(result, padding: 0)
+  result[:boxes].each do |b|
+    usable = b[:box][:dimensions].map { |d| d - 2 * padding }
+    items  = b[:placements].map { |p| p[:item] }
+    packing = { packings: [{ placements: b[:placements], weight: b[:weight] }], errors: [] }
+    expect(geometry_problems({ dimensions: usable, weight_limit: b[:box][:weight_limit] }, items, packing)).to eql([])
+  end
+end
+
+describe '.select_box' do
+  it 'picks the cheapest single box that fits everything' do
+    items = [{ id: 'mug', dimensions: [12, 9, 9], weight: 0.4 }, { id: 'book', dimensions: [24, 17, 3], weight: 0.6 }]
+    result = EasyBoxPacker.select_box(boxes: BOXES, items: items)
+    expect(result[:boxes].map { |b| b[:box][:id] }).to eql(['M'])
+    expect(result[:total_cost]).to eql(18)
+    expect(placed_ids(result).sort).to eql(%w[book mug])
+    expect(result[:unpacked]).to eql([])
+    expect_valid_boxes(result)
+  end
+
+  it 'splits over several boxes when no single box fits' do
+    items = Array.new(6) { |i| { id: i, dimensions: [33, 22, 12], weight: 1.2 } }
+    result = EasyBoxPacker.select_box(boxes: BOXES, items: items)
+    expect(result[:boxes].map { |b| b[:box][:id] }).to eql(%w[L L])
+    expect(placed_ids(result).sort).to eql((0..5).to_a)
+    expect_valid_boxes(result)
+  end
+
+  it 'respects box weight limits' do
+    items = Array.new(4) { |i| { id: i, dimensions: [5, 5, 5], weight: 4 } }
+    result = EasyBoxPacker.select_box(boxes: BOXES, items: items)
+    result[:boxes].each { |b| expect(b[:weight]).to be <= b[:box][:weight_limit] }
+    expect(placed_ids(result).sort).to eql((0..3).to_a)
+  end
+
+  it 'allow_multiple_boxes: false reports items instead of splitting' do
+    items = Array.new(6) { |i| { id: i, dimensions: [33, 22, 12] } }
+    result = EasyBoxPacker.select_box(boxes: BOXES, items: items, allow_multiple_boxes: false)
+    expect(result[:boxes]).to eql([])
+    expect(result[:unpacked].map { |u| u[:reason] }.uniq).to eql([:no_single_box])
+  end
+
+  it 'reports why items can not be packed' do
+    items = [
+      { id: 'heavy', dimensions: [10, 10, 10], weight: 25 },
+      { id: 'pole', dimensions: [100, 5, 5] },
+      { id: 'flat', dimensions: [0, 5, 5] },
+      { id: 'ok', dimensions: [5, 5, 5] }
+    ]
+    result = EasyBoxPacker.select_box(boxes: BOXES, items: items)
+    reasons = result[:unpacked].map { |u| [u[:item][:id], u[:reason]] }.to_h
+    expect(reasons).to eql('heavy' => :too_heavy, 'pole' => :too_big, 'flat' => :invalid_dimensions)
+    expect(result[:errors].size).to eql(3)
+    expect(placed_ids(result)).to eql(['ok'])
+  end
+
+  it 'keeps padding free on every side' do
+    result = EasyBoxPacker.select_box(boxes: BOXES, items: [{ id: 'x', dimensions: [19, 14, 9] }], padding: 2)
+    expect(result[:boxes].first[:box][:id]).to eql('M')
+    expect_valid_boxes(result, padding: 2)
+  end
+
+  it 'uses a custom cost' do
+    by_volume = ->(box) { box[:dimensions].inject(:*) }
+    free_large = ->(box) { box[:id] == 'L' ? 0 : 100 }
+    items = [{ id: 1, dimensions: [5, 5, 5] }]
+    expect(EasyBoxPacker.select_box(boxes: BOXES, items: items, cost: by_volume)[:boxes].first[:box][:id]).to eql('S')
+    expect(EasyBoxPacker.select_box(boxes: BOXES, items: items, cost: free_large)[:boxes].first[:box][:id]).to eql('L')
+  end
+
+  it 'enforces max_items' do
+    items = Array.new(51) { { dimensions: [1, 1, 1] } }
+    expect { EasyBoxPacker.select_box(boxes: BOXES, items: items, max_items: 50) }.to raise_error(ArgumentError, /too many items/)
+  end
+
+  it 'returns valid packings for random input within the time limit' do
+    rng = Random.new(3)
+    20.times do
+      boxes = Array.new(10) { |i| { id: i, dimensions: Array.new(3) { rng.rand(10..60) }, weight_limit: [nil, rng.rand(5..30)].sample(random: rng) } }
+      items = Array.new(rng.rand(1..50)) { |i| { id: i, dimensions: Array.new(3) { rng.rand(2..30) + [0, 0.5].sample(random: rng) }, weight: rng.rand(0.1..3.0) } }
+      result = EasyBoxPacker.select_box(boxes: boxes, items: items, time_limit: 0.5)
+      expect((placed_ids(result) + result[:unpacked].map { |u| u[:item][:id] }).sort).to eql((0...items.size).to_a)
+      expect_valid_boxes(result)
+    end
+  end
+
+  it 'raises on invalid boxes and options' do
+    expect { EasyBoxPacker.select_box(boxes: [], items: []) }.to raise_error(ArgumentError)
+    expect { EasyBoxPacker.select_box(boxes: [{ dimensions: [1, 2] }], items: []) }.to raise_error(ArgumentError)
+    expect { EasyBoxPacker.select_box(boxes: BOXES, items: [], padding: -1) }.to raise_error(ArgumentError)
+    expect { EasyBoxPacker.select_box(boxes: BOXES, items: [], split_strategies: [:nope]) }.to raise_error(ArgumentError)
+  end
+end
+
+describe 'tuning options' do
+  it 'pack places every item hash so callers know which item goes where' do
+    items = [{ id: 'a', dimensions: [2, 2, 2] }, { id: 'b', dimensions: [1, 1, 1] }]
+    result = EasyBoxPacker.pack(container: { dimensions: [5, 5, 5] }, items: items)
+    expect(result[:packings].first[:placements].map { |p| p[:item][:id] }.sort).to eql(%w[a b])
+  end
+
+  it 'split_strategies: [:legacy] reproduces the original packer' do
+    container = { dimensions: [9, 19, 8] }
+    items = [{ dimensions: [9, 11, 4] }, { dimensions: [19, 6, 1] }]
+    legacy = EasyBoxPacker.pack(container: container, items: items, split_strategies: [:legacy], greedy_fallback: false)
+    expect(legacy[:packings].size).to eql(2)
+    expect(EasyBoxPacker.pack(container: container, items: items)[:packings].size).to eql(1)
+  end
+
+  it 'find_smallest_container accepts beam_width and max_side_values' do
+    container = EasyBoxPacker.find_smallest_container(items: CASE_7_ITEMS, time_limit: nil, beam_width: 2, max_side_values: 50)
+    expect_fits(container, CASE_7_ITEMS)
+    expect { EasyBoxPacker.find_smallest_container(items: CASE_7_ITEMS, beam_width: 0) }.to raise_error(ArgumentError)
+    expect { EasyBoxPacker.find_smallest_container(items: CASE_7_ITEMS, max_side_values: 0) }.to raise_error(ArgumentError)
+  end
+end
