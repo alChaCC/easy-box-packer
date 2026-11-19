@@ -18,25 +18,147 @@ module EasyBoxPacker
   # Max distinct side lengths tried per axis while refining.
   MAX_SIDE_VALUES = 1000
 
+  UNPACKED_MESSAGES = {
+    invalid_dimensions: 'has invalid dimensions',
+    too_big: 'is too big for every box',
+    too_heavy: 'is too heavy for every box',
+    no_single_box: 'does not fit in a single box with the other items'
+  }.freeze
+
   class << self
+    # Pack items into as few copies of `container` as possible.
+    #
     # All placements are expressed in the container's frame with its
-    # dimensions sorted descending (length >= width >= height).
-    def pack(container:, items:)
+    # dimensions sorted descending (length >= width >= height). Each placement
+    # has `item:`, the item hash that was given, so callers can tell which item goes where.
+    #
+    # split_strategies - free space split strategies to try, in order, until one needs a single
+    #                    container. Any of :legacy, :max_space, 0..5. Default: SPLIT_STRATEGIES.
+    #                    [:legacy] is the fastest and reproduces 0.0.x results.
+    # greedy_fallback  - when more than one container is needed but all items stacked flat
+    #                    would fit, return that stack instead (default true).
+    def pack(container:, items:, split_strategies: SPLIT_STRATEGIES, greedy_fallback: true)
       validate_container!(container)
+      validate_split_strategies!(split_strategies)
       weight_limit = weight_limit_of(container)
 
       best = nil
-      SPLIT_STRATEGIES.each do |strategy|
+      split_strategies.each do |strategy|
         result = pack_with_strategy(container, items, weight_limit, strategy)
         best = result if best.nil? || result[:packings].size < best[:packings].size
         break if best[:packings].size <= 1
       end
 
-      if best[:packings].size > 1 && check_container_is_bigger_than_greedy_box(container, items)
+      if greedy_fallback && best[:packings].size > 1 && check_container_is_bigger_than_greedy_box(container, items)
         { packings: generate_packing_for_greedy_box(container, items), errors: [] }
       else
         best
       end
+    end
+
+    # Choose boxes from the boxes you have and show how to pack the items in them.
+    #
+    # boxes                - [{ dimensions: [l, w, h] (cm, inside), weight_limit: kg (optional),
+    #                          cost: number (optional, default volume), padding: cm (optional),
+    #                          any other keys such as id: are returned untouched }]
+    # items                - [{ dimensions: [l, w, h] (cm), weight: kg (optional), id: ... }]
+    # allow_multiple_boxes - split the items over several boxes when no single box fits (default true).
+    # padding              - cushioning in cm kept free on every side of every box (default 0).
+    #                        A box's own :padding overrides it.
+    # cost                 - lambda taking a box hash and returning a number, lower is better.
+    #                        Default: box[:cost], or the box volume when it has none.
+    # max_items            - raise ArgumentError when more items are given (default nil, no limit).
+    # time_limit           - soft limit in seconds (default nil). After it only the first split
+    #                        strategy is used: still valid, maybe one more box than needed.
+    # split_strategies,
+    # greedy_fallback      - passed to #pack.
+    #
+    # Returns { boxes: [{ box:, placements:, weight:, cost: }], total_cost:,
+    #           unpacked: [{ item:, reason: }], errors: [String] }.
+    # reason is one of :invalid_dimensions, :too_big, :too_heavy, :no_single_box.
+    # Placements are in the box's usable space (inside dimensions minus padding), sorted descending.
+    def select_box(boxes:, items:, allow_multiple_boxes: true, padding: 0, cost: nil, max_items: nil,
+                   time_limit: nil, split_strategies: SPLIT_STRATEGIES, greedy_fallback: true)
+      raise ArgumentError, 'boxes must not be empty' if boxes.nil? || boxes.empty?
+      raise ArgumentError, 'items must be an array' unless items.is_a?(Array)
+      validate_non_negative!(:padding, padding)
+      validate_non_negative!(:time_limit, time_limit)
+      validate_non_negative!(:max_items, max_items)
+      raise ArgumentError, "too many items: #{items.size} (max_items: #{max_items})" if max_items && items.size > max_items
+      raise ArgumentError, 'cost must respond to #call' if cost && !cost.respond_to?(:call)
+      validate_split_strategies!(split_strategies)
+      pack_options = { split_strategies: split_strategies, greedy_fallback: greedy_fallback }
+
+      candidates = boxes.map do |box|
+        raise ArgumentError, "invalid box dimensions: #{box.inspect}" unless box.is_a?(Hash) && valid_dimensions?(box[:dimensions])
+        box_padding = box.key?(:padding) ? box[:padding] : padding
+        validate_non_negative!(:padding, box_padding)
+        usable = box[:dimensions].map { |d| d - 2 * box_padding }
+        next unless usable.all? { |d| d > EPSILON }
+        box_cost = cost ? cost.call(box) : (box[:cost] || volume(box[:dimensions]))
+        raise ArgumentError, "box cost must be a non-negative number: #{box.inspect}" unless box_cost.is_a?(Numeric) && box_cost >= 0
+        { box: box, container: { dimensions: usable, weight_limit: box[:weight_limit] }, cost: box_cost }
+      end.compact
+
+      unpacked  = []
+      remaining = []
+      items.each do |item|
+        if !item.is_a?(Hash) || !valid_dimensions?(item[:dimensions])
+          unpacked << { item: item, reason: :invalid_dimensions }
+        elsif candidates.none? { |c| fits_in_one?(c[:container][:dimensions], [item], pack_options.merge(weight_limit: c[:container][:weight_limit])) }
+          fits_by_size = candidates.any? { |c| fits_in_one?(c[:container][:dimensions], [item], pack_options) }
+          unpacked << { item: item, reason: fits_by_size ? :too_heavy : :too_big }
+        else
+          remaining << item
+        end
+      end
+
+      deadline = time_limit && Process.clock_gettime(Process::CLOCK_MONOTONIC) + time_limit
+      chosen = []
+      until remaining.empty?
+        remaining_volume = remaining.sum { |i| volume(i[:dimensions]) }
+        remaining_weight = remaining.sum { |i| i[:weight].to_f }
+
+        results = candidates.map do |cand|
+          # a box too small or too weak for everything can not be the single box,
+          # so only the fastest strategy is needed to rank it for filling
+          could_hold_all = volume(cand[:container][:dimensions]) + EPSILON >= remaining_volume &&
+                           weight_limit_of(cand[:container]) + EPSILON >= remaining_weight
+          out_of_time = deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+          options = could_hold_all && !out_of_time ? pack_options : pack_options.merge(split_strategies: [split_strategies.first])
+          [cand, pack(container: cand[:container], items: remaining, **options)]
+        end
+
+        # cheapest single box that holds everything left
+        single = results
+          .select { |_, r| r[:packings].size == 1 && r[:errors].empty? }
+          .min_by { |c, _| [c[:cost], volume(c[:container][:dimensions])] }
+        if single
+          chosen << box_result(single[0], single[1][:packings].first)
+          break
+        end
+        unless allow_multiple_boxes
+          remaining.each { |item| unpacked << { item: item, reason: :no_single_box } }
+          break
+        end
+
+        # otherwise fill the box that packs the most item volume per cost, then repeat
+        c, packing = results.map do |cand, r|
+          [cand, r[:packings].max_by { |p| packed_volume(p) }]
+        end.reject { |_, p| p.nil? }.max_by do |cand, p|
+          [cand[:cost].zero? ? Float::INFINITY : packed_volume(p) / cand[:cost], packed_volume(p), -cand[:cost]]
+        end
+        chosen << box_result(c, packing)
+        packed = packing[:placements].map { |pl| pl[:item] }
+        remaining = remaining.reject { |item| packed.any? { |p| p.equal?(item) } }
+      end
+
+      {
+        boxes: chosen,
+        total_cost: chosen.sum { |b| b[:cost] },
+        unpacked: unpacked,
+        errors: unpacked.map { |u| "Item: #{u[:item]} #{UNPACKED_MESSAGES[u[:reason]]}" }
+      }
     end
 
     # Find a small container (dimensions in cm, floats sorted ascending) that holds all items.
@@ -52,9 +174,16 @@ module EasyBoxPacker
     #                         lower is better. It must not decrease when a side grows.
     #                         Default: [volume, length + girth].
     #
+    # beam_width            - candidates kept per step of the heuristic search (default 1).
+    # max_side_values       - max distinct side lengths tried per axis while refining (default 1000).
+    # split_strategies,
+    # greedy_fallback       - passed to #pack.
+    #
     # Returns nil when no container satisfies max_length / max_length_plus_girth.
     def find_smallest_container(items:, time_limit: DEFAULT_TIME_LIMIT, max_attempts: nil,
-                                max_length: nil, max_length_plus_girth: nil, cost: nil)
+                                max_length: nil, max_length_plus_girth: nil, cost: nil,
+                                beam_width: SEARCH_BEAM_WIDTH, max_side_values: MAX_SIDE_VALUES,
+                                split_strategies: SPLIT_STRATEGIES, greedy_fallback: true)
       raise ArgumentError, 'items must not be empty' if items.nil? || items.empty?
       items.each do |item|
         raise ArgumentError, "invalid dimensions for item: #{item}" unless valid_dimensions?(item[:dimensions])
@@ -64,16 +193,21 @@ module EasyBoxPacker
       validate_non_negative!(:max_length, max_length)
       validate_non_negative!(:max_length_plus_girth, max_length_plus_girth)
       raise ArgumentError, 'cost must respond to #call' if cost && !cost.respond_to?(:call)
+      raise ArgumentError, 'beam_width must be a positive integer' unless beam_width.is_a?(Integer) && beam_width > 0
+      raise ArgumentError, 'max_side_values must be a positive integer' unless max_side_values.is_a?(Integer) && max_side_values > 0
+      validate_split_strategies!(split_strategies)
+      pack_options = { split_strategies: split_strategies, greedy_fallback: greedy_fallback }
 
       started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       limits = { max_length: max_length, max_length_plus_girth: max_length_plus_girth }
-      start = heuristic_smallest_container(items)
+      start = heuristic_smallest_container(items, beam_width, pack_options)
       start = nil unless within_limits?(start, limits)
       return start && normalize(start) if items.size == 1
 
       best = refine_container(
         items, start,
-        deadline: time_limit && started_at + time_limit, max_attempts: max_attempts, limits: limits, cost: cost
+        deadline: time_limit && started_at + time_limit, max_attempts: max_attempts, limits: limits, cost: cost,
+        max_side_values: max_side_values, pack_options: pack_options
       )
       best && normalize(best)
     end
@@ -81,7 +215,7 @@ module EasyBoxPacker
     private
 
     # Original search: grow a container item by item, then compare with the greedy box.
-    def heuristic_smallest_container(items)
+    def heuristic_smallest_container(items, beam_width, pack_options)
       # order items from biggest to smallest
       sorted_items = items.sort_by { |h| h[:dimensions].sort }.reverse
       return sorted_items.first[:dimensions] if sorted_items.size == 1
@@ -90,12 +224,13 @@ module EasyBoxPacker
       possible_containers = find_possible_containers(
         container: sorted_items.first[:dimensions],
         items: sorted_items.map { |i| i[:dimensions] },
-        min_vol: min_vol
+        min_vol: min_vol,
+        beam_width: beam_width
       )
 
       select_container = possible_containers
         .sort_by { |a| [volume(a), a.inject(:+)] }
-        .find { |c| fits_in_one?(c, items) }
+        .find { |c| fits_in_one?(c, items, pack_options) }
 
       # The greedy box (all items laid flat and stacked) always fits.
       greedy_box = item_greedy_box(items)
@@ -105,7 +240,7 @@ module EasyBoxPacker
     # Every container side is (at most) a sum of item sides, so enumerate sides
     # (a <= b <= c) from those sums and test-pack candidates that would be cheaper
     # than the best one found so far. Starts from `best` so it is never worse.
-    def refine_container(items, best, deadline:, max_attempts:, limits:, cost:)
+    def refine_container(items, best, deadline:, max_attempts:, limits:, cost:, max_side_values:, pack_options:)
       return best if max_attempts == 0
       return best if deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
       cost_of  = cost || method(:default_cost)
@@ -123,7 +258,7 @@ module EasyBoxPacker
       cap = sorted.sum { |d| d[2] }
       cap = [cap, limits[:max_length]].min if limits[:max_length]
       cap = largest_side_beating(cap, min_a, min_b, min_c, beats_best) if best
-      values = side_values(sorted, cap)
+      values = side_values(sorted, cap, max_side_values)
       attempts = 0
 
       # Try the smallest side closest to a cube first, so that when the time limit
@@ -148,7 +283,7 @@ module EasyBoxPacker
             return best if deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
             return best if max_attempts && attempts >= max_attempts
             attempts += 1
-            next unless fits_in_one?(candidate, items)
+            next unless fits_in_one?(candidate, items, pack_options)
 
             best, best_cost = candidate, cost_of.call(candidate)
             break
@@ -172,7 +307,7 @@ module EasyBoxPacker
     # Possible container side lengths: subset sums of item sides up to `cap`.
     # When there are too many (lots of different float sizes) they are rounded up
     # to a grid, which only makes candidates slightly bigger, never invalid.
-    def side_values(sorted_dims, cap)
+    def side_values(sorted_dims, cap, max_values)
       sums = { 0.0 => true }
       grid = nil
       sorted_dims.flatten.each do |d|
@@ -182,20 +317,43 @@ module EasyBoxPacker
           nv = grid ? ((nv / grid).ceil * grid) : nv
           sums[nv.round(6)] = true
         end
-        if !grid && sums.size > MAX_SIDE_VALUES * 10
-          grid = cap / MAX_SIDE_VALUES
+        if !grid && sums.size > max_values * 10
+          grid = cap / max_values
           sums = sums.keys.map { |v| ((v / grid).ceil * grid).round(6) }.uniq.map { |v| [v, true] }.to_h
         end
       end
       values = sums.keys.reject(&:zero?).sort
-      # keep the search bounded: at most MAX_SIDE_VALUES values spread over the range
-      values = values.each_slice((values.size.to_f / MAX_SIDE_VALUES).ceil).map(&:first) if values.size > MAX_SIDE_VALUES
+      # keep the search bounded: at most max_values values spread over the range
+      values = values.each_slice((values.size.to_f / max_values).ceil).map(&:first) if values.size > max_values
       values
     end
 
-    def fits_in_one?(dimensions, items)
-      packing = pack(container: { dimensions: dimensions }, items: items)
+    # pack_options: split_strategies:, greedy_fallback: and optionally weight_limit:
+    def fits_in_one?(dimensions, items, pack_options = {})
+      options = pack_options.dup
+      container = { dimensions: dimensions, weight_limit: options.delete(:weight_limit) }
+      packing = pack(container: container, items: items, **options)
       packing[:packings].size == 1 && packing[:errors].empty?
+    end
+
+    def box_result(candidate, packing)
+      {
+        box: candidate[:box],
+        placements: packing[:placements],
+        weight: packing[:weight],
+        cost: candidate[:cost]
+      }
+    end
+
+    def packed_volume(packing)
+      packing[:placements].sum { |pl| volume(pl[:dimensions]) }
+    end
+
+    def validate_split_strategies!(strategies)
+      allowed = [:legacy, :max_space, 0, 1, 2, 3, 4, 5]
+      unless strategies.is_a?(Array) && !strategies.empty? && strategies.all? { |s| allowed.include?(s) }
+        raise ArgumentError, "split_strategies must be a non-empty array of #{allowed.inspect}"
+      end
     end
 
     def length_plus_girth(dimensions)
@@ -329,7 +487,7 @@ module EasyBoxPacker
 
     # Grow a container by adding items one at a time on each face, keeping
     # the most "cube like" and the smallest candidates at each step (beam search).
-    def find_possible_containers(container:, items:, min_vol:)
+    def find_possible_containers(container:, items:, min_vol:, beam_width: SEARCH_BEAM_WIDTH)
       possible_containers = []
       frontier = [container.sort]
 
@@ -337,7 +495,7 @@ module EasyBoxPacker
         candidates = frontier.flat_map { |c| grow_container(c, item) }.uniq
         candidates.each { |c| possible_containers << c if volume(c) >= min_vol }
 
-        frontier = candidates.sort_by { |a| [std(a), volume(a), a.inject(:+)] }.first(SEARCH_BEAM_WIDTH)
+        frontier = candidates.sort_by { |a| [std(a), volume(a), a.inject(:+)] }.first(beam_width)
       end
 
       possible_containers.uniq
@@ -396,7 +554,8 @@ module EasyBoxPacker
       {
         dimensions: final[:rotation],
         position: space[:position],
-        weight: item[:weight].to_f
+        weight: item[:weight].to_f,
+        item: item
       }
     end
 
@@ -686,7 +845,8 @@ module EasyBoxPacker
         return_h[:placements] << {
           dimensions: axis_map.map { |a| dims[a] },
           position: axis_map.map { |a| position[a] },
-          weight: i[:weight].to_f
+          weight: i[:weight].to_f,
+          item: i
         }
         return_h[:weight] += i[:weight].to_f
         height += dims[2]

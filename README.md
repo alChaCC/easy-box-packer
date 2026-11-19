@@ -100,6 +100,62 @@ cost = ->(d) { (d.inject(:*) / 5000.0).ceil + (d.max > 60 ? 20 : 0) }
 EasyBoxPacker.find_smallest_container(items: items, cost: cost)
 ```
 
+### Choose boxes from the boxes you have
+
+```ruby
+result = EasyBoxPacker.select_box(
+  boxes: [
+    { id: 'S', dimensions: [20, 15, 10], weight_limit: 5,  cost: 10 },   # inside size in cm, kg
+    { id: 'M', dimensions: [30, 25, 20], weight_limit: 10, cost: 18 },
+    { id: 'L', dimensions: [45, 35, 30], weight_limit: 20, cost: 30 }
+  ],
+  items: [
+    { id: 'mug',  dimensions: [12, 9, 9],  weight: 0.4 },
+    { id: 'book', dimensions: [24, 17, 3], weight: 0.6 }
+  ]
+)
+
+result[:boxes].first[:box][:id]                       # "M"
+result[:boxes].first[:placements].map { |p| p[:item][:id] } # ["book", "mug"]
+result[:boxes].first[:placements].first[:position]    # where to put it
+result[:total_cost]                                   # 18
+result[:unpacked]                                     # [] or [{ item:, reason: :too_big }]
+```
+
+It returns the cheapest single box that holds everything; when none does, it
+fills the box that packs the most item volume per cost and repeats.
+
+| option | default | meaning |
+|---|---|---|
+| `allow_multiple_boxes` | `true` | split items over several boxes when no single box fits |
+| `padding` | `0` | cm of cushioning kept free on every side (a box's own `:padding` wins) |
+| `cost` | `box[:cost]` or volume | lambda `box -> number`, lower is better |
+| `max_items` | `nil` | raise `ArgumentError` when more items are given |
+| `time_limit` | `nil` | soft limit in seconds; after it only the fastest strategy is used |
+| `split_strategies`, `greedy_fallback` | | passed to `pack` |
+
+`unpacked` reasons: `:invalid_dimensions`, `:too_big`, `:too_heavy`, `:no_single_box`.
+
+### Tuning options
+
+| option | methods | default | meaning |
+|---|---|---|---|
+| `split_strategies` | all | `EasyBoxPacker::SPLIT_STRATEGIES` | free space split strategies tried in order (`:legacy`, `:max_space`, `0`..`5`). `[:legacy]` is fastest |
+| `greedy_fallback` | all | `true` | return all items stacked flat when that fits but packing needs more containers |
+| `beam_width` | `find_smallest_container` | `1` | candidates kept per step of the heuristic search |
+| `max_side_values` | `find_smallest_container` | `1000` | max distinct side lengths tried per axis while refining |
+
+Every placement includes `item:`, the item hash you passed in, so you can tell
+which item goes where.
+
+### Using it from a web API
+
+- All state is passed in, nothing global is changed, so it is safe to call from
+  several threads.
+- Keys must be symbols: parse JSON with `JSON.parse(body, symbolize_names: true)`.
+- It is CPU bound. Set `max_items` and `time_limit`, and run it outside the request
+  thread (a job queue) or with a request timeout.
+
 ## Development
 
 ```
@@ -108,6 +164,13 @@ bundle exec rspec easy-box-packer_spec.rb
 ```
 
 ## Changelog
+
+### 0.3.0
+
+- New `select_box`: choose boxes from your own box list (cost, weight limit, padding,
+  several boxes when needed) and get the placements.
+- Placements include the original `item:`.
+- `split_strategies`, `greedy_fallback`, `beam_width` and `max_side_values` can be passed in.
 
 ### 0.2.0
 
