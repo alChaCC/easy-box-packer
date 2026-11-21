@@ -1,0 +1,26 @@
+name: KB link
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  kb-link:
+    runs-on: ubuntu-latest
+    steps:
+      - name: PR body links a KB PR or says why not
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s\n' "$PR_BODY" | tr -d '\r' | grep -Eq '^[[:space:]]*KB:[[:space:]]*(alChaCC/easy-box-packer-kb#[0-9]+|n/a[[:space:]]*\([^)]*[^[:space:])][^)]*\))'; then
+            echo "KB link found."
+            exit 0
+          fi
+          echo "::error title=Missing KB link::The PR body needs a line like one of these:"
+          echo "::error::KB: alChaCC/easy-box-packer-kb#<number>   (the KB PR that documents this change)"
+          echo "::error::KB: n/a (<reason>)                       (e.g. KB: n/a (CI-only change))"
+          echo "Rule: every code change comes with a KB update. See CONTRIBUTING.md in alChaCC/easy-box-packer-kb."
+          echo "Edit the PR description; this check re-runs on edit."
+          exit 1
