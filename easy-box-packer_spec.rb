@@ -717,3 +717,111 @@ describe '.loading_order' do
     expect(placements.all? { |p| p[:support].between?(0, 1) }).to be(true)
   end
 end
+
+describe 'time_limit is an upper bound' do
+  def elapsed
+    started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    result = yield
+    [result, Process.clock_gettime(Process::CLOCK_MONOTONIC) - started]
+  end
+
+  # inside the box frame, no overlaps, upright kept, nothing on a fragile item, weight limit
+  def constraint_problems(result)
+    eps = 1e-9
+    result[:boxes].flat_map do |b|
+      frame = b[:container_dimensions]
+      pls = b[:placements]
+      problems = pls.flat_map do |pl|
+        p = (0..2).select { |k| pl[:position][k] < -eps || pl[:position][k] + pl[:dimensions][k] > frame[k] + eps }.map { 'out of bounds' }
+        p << 'upright' if pl[:item][:upright] && (pl[:dimensions][2] - pl[:item][:dimensions][2]).abs > eps
+        p
+      end
+      pls.combination(2).each do |a, o|
+        problems << 'overlap' if (0..2).all? { |k| a[:position][k] < o[:position][k] + o[:dimensions][k] - eps && o[:position][k] < a[:position][k] + a[:dimensions][k] - eps }
+        [[a, o], [o, a]].each do |f, u|
+          next unless f[:item][:fragile]
+          xy = (0..1).all? { |k| f[:position][k] < u[:position][k] + u[:dimensions][k] - eps && u[:position][k] < f[:position][k] + f[:dimensions][k] - eps }
+          problems << 'on top of fragile' if xy && u[:position][2] >= f[:position][2] + f[:dimensions][2] - eps
+        end
+      end
+      problems << 'overweight' if b[:box][:weight_limit] && b[:weight] > b[:box][:weight_limit] + eps
+      problems
+    end
+  end
+
+  def random_items(n, rng, constrained: false)
+    Array.new(n) do |i|
+      { id: i, dimensions: [rng.rand(3..15), rng.rand(3..15), rng.rand(2..10)], weight: rng.rand(0.1..3.0).round(2),
+        upright: constrained && rng.rand < 0.3, fragile: constrained && rng.rand < 0.1 }
+    end
+  end
+
+  let(:boxes) do
+    [[20, 15, 10], [30, 20, 15], [40, 30, 20], [50, 40, 30], [60, 40, 40], [80, 60, 50]].each_with_index.map do |d, i|
+      { id: "B#{i}", dimensions: d, cost: (d.inject(:*) / 1000.0 + 2).round(2), weight_limit: (i.odd? ? 40 : nil) }
+    end
+  end
+
+  # 0.4.0 took 2-4 s for these with time_limit 0.5. Loose bounds for slow CI machines.
+  [false, true].each do |constrained|
+    it "select_box stops at time_limit with 200 items (constrained: #{constrained}), every item placed validly" do
+      items = random_items(200, Random.new(constrained ? 2 : 1), constrained: constrained)
+      result, seconds = elapsed { EasyBoxPacker.select_box(boxes: boxes, items: items, time_limit: 0.3) }
+      expect(seconds).to be < 0.3 * 1.2 + 0.15
+      expect(placed_ids(result).sort).to eql((0...200).to_a)
+      expect(result[:unpacked]).to eql([])
+      expect(constraint_problems(result)).to eql([])
+    end
+  end
+
+  it 'select_box with time_limit 0 still returns a valid answer for every item' do
+    items = random_items(60, Random.new(3), constrained: true) + [{ id: 'tall', dimensions: [10, 10, 45], upright: true }]
+    result = EasyBoxPacker.select_box(boxes: boxes, items: items, time_limit: 0)
+    expect(placed_ids(result).sort_by(&:to_s)).to eql(items.map { |i| i[:id] }.sort_by(&:to_s))
+    expect(constraint_problems(result)).to eql([])
+  end
+
+  it 'select_box out of time still uses one box when one box holds everything' do
+    items = random_items(50, Random.new(7))
+    full  = EasyBoxPacker.select_box(boxes: boxes, items: items, time_limit: nil)
+    quick = EasyBoxPacker.select_box(boxes: boxes, items: items, time_limit: 0)
+    expect(full[:boxes].size).to eql(1)
+    expect(quick[:boxes].size).to eql(1)
+    expect(constraint_problems(quick)).to eql([])
+  end
+
+  it 'select_box out of time puts items that need different boxes in different boxes' do
+    big   = { id: 'big', dimensions: [75, 55, 45], weight: 1 }
+    small = Array.new(30) { |i| { id: i, dimensions: [8, 8, 8], weight: 0.2 } }
+    result = EasyBoxPacker.select_box(boxes: boxes, items: [big] + small, time_limit: 0)
+    expect(placed_ids(result).sort_by(&:to_s)).to eql(([big] + small).map { |i| i[:id] }.sort_by(&:to_s))
+    expect(constraint_problems(result)).to eql([])
+  end
+
+  it 'select_box without allow_multiple_boxes out of time: one box or every item no_single_box' do
+    items = random_items(200, Random.new(4))
+    result = EasyBoxPacker.select_box(boxes: boxes, items: items, time_limit: 0, allow_multiple_boxes: false)
+    expect(result[:boxes].size + (result[:unpacked].empty? ? 0 : 1)).to eql(1)
+    expect(result[:unpacked].map { |u| u[:reason] }.uniq).to eql([:no_single_box]) unless result[:unpacked].empty?
+    expect(placed_ids(result).size + result[:unpacked].size).to eql(200)
+    expect(constraint_problems(result)).to eql([])
+  end
+
+  it 'select_box gives the same answer with a generous time_limit as without one' do
+    items = random_items(30, Random.new(5), constrained: true)
+    expect(EasyBoxPacker.select_box(boxes: boxes, items: items, time_limit: 60))
+      .to eql(EasyBoxPacker.select_box(boxes: boxes, items: items, time_limit: nil))
+  end
+
+  it 'find_smallest_container stops at time_limit with 200 items and the container holds them' do
+    items = random_items(200, Random.new(6))
+    container, seconds = elapsed { EasyBoxPacker.find_smallest_container(items: items, time_limit: 0.3) }
+    expect(seconds).to be < 0.3 * 1.2 + 0.15
+    expect_fits(container, items)
+  end
+
+  it 'find_smallest_container gives the same answer with a generous time_limit and max_attempts as with nil' do
+    expect(EasyBoxPacker.find_smallest_container(items: CASE_7_ITEMS, time_limit: 60, max_attempts: 50))
+      .to eql(EasyBoxPacker.find_smallest_container(items: CASE_7_ITEMS, time_limit: nil, max_attempts: 50))
+  end
+end
