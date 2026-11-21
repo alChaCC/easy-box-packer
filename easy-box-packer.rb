@@ -18,6 +18,10 @@ module EasyBoxPacker
   # Max distinct side lengths tried per axis while refining.
   MAX_SIDE_VALUES = 1000
 
+  # Share of a box's volume assumed usable when select_box estimates how many
+  # copies it needs after its time limit (see quick_plan).
+  QUICK_PLAN_FILL = 0.8
+
   UNPACKED_MESSAGES = {
     invalid_dimensions: 'has invalid dimensions',
     too_big: 'is too big for every box',
@@ -48,29 +52,7 @@ module EasyBoxPacker
     def pack(container:, items:, split_strategies: SPLIT_STRATEGIES, greedy_fallback: true)
       validate_container!(container)
       validate_split_strategies!(split_strategies)
-      weight_limit = weight_limit_of(container)
-      constrained = constrained?(items)
-      frames = constrained ? container_frames(container[:dimensions]) : [container[:dimensions].sort.reverse]
-
-      best = nil
-      frames.each do |frame|
-        split_strategies.each do |strategy|
-          result = pack_with_strategy(frame, items, weight_limit, strategy)
-          if best.nil? || ([result[:errors].size, result[:packings].size] <=> [best[:errors].size, best[:packings].size]) < 0
-            best = result
-          end
-          break if best[:packings].size <= 1
-        end
-        break if best[:packings].size <= 1 && best[:errors].empty?
-      end
-
-      # the flat stack ignores constraints, so it is only used without them
-      if greedy_fallback && !constrained && best[:packings].size > 1 && check_container_is_bigger_than_greedy_box(container, items)
-        { packings: generate_packing_for_greedy_box(container, items), errors: [],
-          container_dimensions: container[:dimensions].sort.reverse }
-      else
-        best
-      end
+      pack_until(container, items, split_strategies, greedy_fallback, nil)
     end
 
     # Placements in the order to put them in the box: bottom layer first, then from
@@ -92,8 +74,11 @@ module EasyBoxPacker
     # cost                 - lambda taking a box hash and returning a number, lower is better.
     #                        Default: box[:cost], or the box volume when it has none.
     # max_items            - raise ArgumentError when more items are given (default nil, no limit).
-    # time_limit           - soft limit in seconds (default nil). After it only the first split
-    #                        strategy is used: still valid, maybe one more box than needed.
+    # time_limit           - seconds for the whole call (default nil, no limit). An upper bound:
+    #                        when it runs out the cheaper of a quick plan made in advance and the
+    #                        boxes packed in time is returned (see quick_plan). Still valid, maybe
+    #                        more boxes or cost than needed. It can only be exceeded by one
+    #                        first-strategy pack of the remaining items.
     # split_strategies,
     # greedy_fallback      - passed to #pack.
     #
@@ -103,6 +88,7 @@ module EasyBoxPacker
     # Placements are in the box's usable space (inside dimensions minus padding), sorted descending.
     def select_box(boxes:, items:, allow_multiple_boxes: true, padding: 0, cost: nil, max_items: nil,
                    time_limit: nil, split_strategies: SPLIT_STRATEGIES, greedy_fallback: true)
+      started_at = now
       raise ArgumentError, 'boxes must not be empty' if boxes.nil? || boxes.empty?
       raise ArgumentError, 'items must be an array' unless items.is_a?(Array)
       validate_non_negative!(:padding, padding)
@@ -126,34 +112,57 @@ module EasyBoxPacker
 
       unpacked  = []
       remaining = []
+      # indexes of the candidates each item fits in on its own (size and weight)
+      fits = {}.compare_by_identity
       items.each do |item|
         if !item.is_a?(Hash) || !valid_dimensions?(item[:dimensions])
           unpacked << { item: item, reason: :invalid_dimensions }
-        elsif candidates.none? { |c| fits_in_one?(c[:container][:dimensions], [item], pack_options.merge(weight_limit: c[:container][:weight_limit])) }
-          fits_by_size = candidates.any? { |c| fits_in_one?(c[:container][:dimensions], [item], pack_options) }
+          next
+        end
+        fits[item] = candidates.each_index.select { |k| fits_alone?(candidates[k][:container], item) }
+        if fits[item].empty?
+          fits_by_size = candidates.any? { |c| fits_alone?({ dimensions: c[:container][:dimensions] }, item) }
           unpacked << { item: item, reason: fits_by_size ? :too_heavy : :too_big }
         else
           remaining << item
         end
       end
 
-      deadline = time_limit && Process.clock_gettime(Process::CLOCK_MONOTONIC) + time_limit
+      deadline = time_limit && started_at + time_limit
       chosen = []
+      fallback = nil
       until remaining.empty?
+        if out_of_time?(deadline)
+          finish = fallback || quick_plan(candidates, remaining, fits, split_strategies.first, greedy_fallback, allow_multiple_boxes, nil)
+          chosen.concat(finish[:boxes])
+          unpacked.concat(finish[:unpacked])
+          break
+        end
+        # With a time limit, first make a cheap valid answer for what is left, so
+        # that running out of time later costs nothing more (see quick_plan). Its
+        # pack is remembered and reused by the round below, not done twice.
+        memo = deadline && {}
+        fallback = deadline && quick_plan(candidates, remaining, fits, split_strategies.first, greedy_fallback, allow_multiple_boxes, memo)
+
         remaining_volume = remaining.sum { |i| volume(i[:dimensions]) }
         remaining_weight = remaining.sum { |i| i[:weight].to_f }
 
-        results = candidates.map do |cand|
+        # Every candidate is packed with what is left. When the deadline passes
+        # during the round, the round is abandoned (see quick_plan).
+        results = []
+        candidates.each do |cand|
           # a box too small or too weak for everything can not be the single box,
           # so only the fastest strategy is needed to rank it for filling
           could_hold_all = volume(cand[:container][:dimensions]) + EPSILON >= remaining_volume &&
                            weight_limit_of(cand[:container]) + EPSILON >= remaining_weight
-          out_of_time = deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-          options = could_hold_all && !out_of_time ? pack_options : pack_options.merge(split_strategies: [split_strategies.first])
-          [cand, pack(container: cand[:container], items: remaining, **options)]
+          strategies = could_hold_all ? split_strategies : [split_strategies.first]
+          result = pack_until(cand[:container], remaining, strategies, greedy_fallback, deadline, memo)
+          break if result.nil?
+          results << [cand, result]
+          break if out_of_time?(deadline)
         end
 
-        # cheapest single box that holds everything left
+        # cheapest single box that holds everything left (of the boxes packed in time)
         single = results
           .select { |_, r| r[:packings].size == 1 && r[:errors].empty? }
           .min_by { |c, _| [c[:cost], volume(c[:container][:dimensions])] }
@@ -161,6 +170,12 @@ module EasyBoxPacker
           chosen << box_result(single[0], single[1])
           break
         end
+        if results.size < candidates.size
+          # out of time: also consider the boxes packed in time that hold everything left
+          fallback = cheapest_plan(fallback, results, allow_multiple_boxes)
+          next
+        end
+
         unless allow_multiple_boxes
           remaining.each { |item| unpacked << { item: item, reason: :no_single_box } }
           break
@@ -187,9 +202,10 @@ module EasyBoxPacker
 
     # Find a small container (dimensions in cm, floats sorted ascending) that holds all items.
     #
-    # time_limit            - soft limit in seconds for the whole call (default 0.5): no new
-    #                         candidate is tried after it, the first heuristic answer is always
-    #                         computed. nil = no time limit, 0 = skip refining (0.1.0 behaviour).
+    # time_limit            - seconds for the whole call (default 0.5), an upper bound: out of time
+    #                         during the heuristic, the greedy (or row) container is returned, which
+    #                         holds every item. nil = no time limit, 0 = heuristic only, run to the
+    #                         end (0.1.0 behaviour).
     # max_attempts          - max number of candidate containers test-packed while refining.
     #                         Unlike time_limit it gives the same result on every machine. nil = no limit.
     # max_length            - longest side allowed (cm), e.g. a carrier limit.
@@ -208,6 +224,7 @@ module EasyBoxPacker
                                 max_length: nil, max_length_plus_girth: nil, cost: nil,
                                 beam_width: SEARCH_BEAM_WIDTH, max_side_values: MAX_SIDE_VALUES,
                                 split_strategies: SPLIT_STRATEGIES, greedy_fallback: true)
+      started_at = now
       raise ArgumentError, 'items must not be empty' if items.nil? || items.empty?
       items.each do |item|
         raise ArgumentError, "invalid dimensions for item: #{item}" unless valid_dimensions?(item[:dimensions])
@@ -222,9 +239,10 @@ module EasyBoxPacker
       validate_split_strategies!(split_strategies)
       pack_options = { split_strategies: split_strategies, greedy_fallback: greedy_fallback }
 
-      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
       limits = { max_length: max_length, max_length_plus_girth: max_length_plus_girth }
-      start = heuristic_smallest_container(items, beam_width, pack_options)
+      # time_limit 0 keeps the heuristic answer of 0.1.0 (deterministic, not bounded)
+      deadline = time_limit && time_limit > 0 ? started_at + time_limit : nil
+      start = heuristic_smallest_container(items, beam_width, pack_options, deadline)
       start = nil unless within_limits?(start, limits)
       return start && normalize(start) if items.size == 1
 
@@ -238,8 +256,146 @@ module EasyBoxPacker
 
     private
 
+    def now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def out_of_time?(deadline)
+      !deadline.nil? && now > deadline
+    end
+
+    # #pack without validation. With a deadline (monotonic seconds) no further
+    # strategy or frame is tried after it, and a strategy still running is
+    # abandoned between two items. Returns nil when not even the first strategy
+    # finished. deadline nil gives exactly #pack's result.
+    #
+    # memo - optional Hash shared by calls packing the same items array: a strategy
+    #        already run in a frame of the same container is not run again.
+    def pack_until(container, items, split_strategies, greedy_fallback, deadline, memo = nil)
+      weight_limit = weight_limit_of(container)
+      constrained = constrained?(items)
+      frames = constrained ? container_frames(container[:dimensions]) : [container[:dimensions].sort.reverse]
+
+      best = nil
+      frames.each do |frame|
+        split_strategies.each do |strategy|
+          key = memo && [container.object_id, frame, strategy]
+          result = (memo && memo[key]) || pack_with_strategy(frame, items, weight_limit, strategy, deadline)
+          break if result.nil?
+          memo[key] = result if memo
+          if best.nil? || ([result[:errors].size, result[:packings].size] <=> [best[:errors].size, best[:packings].size]) < 0
+            best = result
+          end
+          break if best[:packings].size <= 1 || out_of_time?(deadline)
+        end
+        break if best.nil? || out_of_time?(deadline)
+        break if best[:packings].size <= 1 && best[:errors].empty?
+      end
+      return nil if best.nil?
+
+      # the flat stack ignores constraints, so it is only used without them
+      if greedy_fallback && !constrained && best[:packings].size > 1 && check_container_is_bigger_than_greedy_box(container, items)
+        { packings: generate_packing_for_greedy_box(container, items), errors: [],
+          container_dimensions: container[:dimensions].sort.reverse }
+      else
+        best
+      end
+    end
+
+    # A cheap, valid answer for the remaining items, used by select_box when time
+    # runs out: { boxes:, unpacked: }. Like the full search it prefers one box: it
+    # repeatedly takes the box most of the remaining items fit in on their own, then
+    # one estimated to hold them all in a single copy (cheapest first), else the
+    # lowest estimated cost (copies needed by volume and by weight, times its cost),
+    # and packs those items into as many copies of it as needed with one split
+    # strategy: one pack per box type used, usually only one. Every item fits its box alone, so each pass places items;
+    # if a pass placed none, each gets a copy of its own. Without
+    # allow_multiple_boxes there is one pass, into the cheapest box estimated to
+    # hold everything (else the largest): one box, or every item :no_single_box.
+    def quick_plan(candidates, remaining, fits, strategy, greedy_fallback, allow_multiple_boxes, memo)
+      all_items = remaining
+      boxes = []
+      until remaining.empty?
+        k = candidates.each_index.min_by do |i|
+          c = candidates[i]
+          group = remaining.select { |item| fits[item].include?(i) }
+          copies = estimated_copies(c[:container], group)
+          single = copies == 1 ? 0 : 1
+          rank = allow_multiple_boxes ? [single, c[:cost] * copies] : [single, single.zero? ? c[:cost] : 0]
+          [-group.size, *rank, -volume(c[:container][:dimensions])]
+        end
+        cand = candidates[k]
+        group = remaining.select { |item| fits[item].include?(k) }
+        group = remaining if group.size == remaining.size
+        result = pack_until(cand[:container], group, [strategy], greedy_fallback, nil, group.equal?(all_items) ? memo : nil)
+
+        unless allow_multiple_boxes
+          if group.size == remaining.size && result[:packings].size == 1 && result[:errors].empty?
+            return { boxes: [box_result(cand, result)], unpacked: [] }
+          end
+          return { boxes: [], unpacked: remaining.map { |item| { item: item, reason: :no_single_box } } }
+        end
+
+        placed = {}.compare_by_identity
+        result[:packings].each do |packing|
+          boxes << box_result(cand, result.merge(packings: [packing]))
+          packing[:placements].each { |pl| placed[pl[:item]] = true }
+        end
+        if placed.empty?
+          group.each do |item|
+            boxes << alone_box_result(cand, item)
+            placed[item] = true
+          end
+        end
+        remaining = remaining.reject { |item| placed.key?(item) }
+      end
+      { boxes: boxes, unpacked: [] }
+    end
+
+    # Copies of the container needed at least, by volume (at QUICK_PLAN_FILL of it)
+    # and by weight. An estimate for choosing a box, never used for placements.
+    def estimated_copies(container, items)
+      by_volume = items.sum { |i| volume(i[:dimensions]) } / (volume(container[:dimensions]) * QUICK_PLAN_FILL)
+      limit = weight_limit_of(container)
+      by_weight = limit.infinite? || limit <= 0 ? 0 : items.sum { |i| i[:weight].to_f } / limit
+      [by_volume.ceil, by_weight.ceil, 1].max
+    end
+
+    # The better of the plan and the packs (from a round cut short by the deadline)
+    # that hold every remaining item, in as many copies of their box as they need.
+    # Better, as in the full search: nothing unpacked, then one box, then cheaper.
+    def cheapest_plan(plan, results, allow_multiple_boxes)
+      rank = ->(p) { [p[:unpacked].empty? ? 0 : 1, p[:boxes].size == 1 ? 0 : 1, p[:boxes].sum { |b| b[:cost] }] }
+      results.each do |cand, result|
+        next unless result[:errors].empty?
+        next if !allow_multiple_boxes && result[:packings].size > 1
+        other = { boxes: result[:packings].map { |pk| box_result(cand, result.merge(packings: [pk])) }, unpacked: [] }
+        plan = other if (rank.call(other) <=> rank.call(plan)) < 0
+      end
+      plan
+    end
+
+    # The item alone in its own copy of the candidate (it must fit alone).
+    def alone_box_result(candidate, item)
+      container = candidate[:container]
+      frames = constrained?([item]) ? container_frames(container[:dimensions]) : [container[:dimensions].sort.reverse]
+      frame, placement = frames.lazy.map { |f| [f, place(item, { dimensions: f, position: [0, 0, 0] })] }.find { |_, pl| pl }
+      box_result(candidate, { packings: [{ placements: [placement], weight: placement[:weight] }], container_dimensions: frame })
+    end
+
+    # Whether the item alone fits in an empty container: the same answer as
+    # packing [item] into it, without the cost of a full #pack.
+    def fits_alone?(container, item)
+      return false if item[:weight].to_f > weight_limit_of(container)
+      frames = constrained?([item]) ? container_frames(container[:dimensions]) : [container[:dimensions].sort.reverse]
+      frames.any? { |frame| place(item, { dimensions: frame, position: [0, 0, 0] }) }
+    end
+
     # Original search: grow a container item by item, then compare with the greedy box.
-    def heuristic_smallest_container(items, beam_width, pack_options)
+    # After the deadline no more candidates are test-packed (the one being packed is
+    # abandoned) and the answer is the greedy box, or the row of items when some are
+    # upright / fragile. Both hold every item by construction.
+    def heuristic_smallest_container(items, beam_width, pack_options, deadline = nil)
       # order items from biggest to smallest
       sorted_items = items.sort_by { |h| h[:dimensions].sort }.reverse
       return sorted_items.first[:dimensions] if sorted_items.size == 1
@@ -254,7 +410,7 @@ module EasyBoxPacker
 
       select_container = possible_containers
         .sort_by { |a| [volume(a), a.inject(:+)] }
-        .find { |c| fits_in_one?(c, items, pack_options) }
+        .find { |c| break nil if out_of_time?(deadline); fits_in_one?(c, items, pack_options, deadline) }
 
       if constrained?(items)
         # the flat stack breaks upright / fragile items: fall back to the items in one row
@@ -328,7 +484,7 @@ module EasyBoxPacker
             return best if deadline && Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
             return best if max_attempts && attempts >= max_attempts
             attempts += 1
-            next unless fits_in_one?(candidate, items, pack_options)
+            next unless fits_in_one?(candidate, items, pack_options, deadline)
 
             best, best_cost = candidate, cost_of.call(candidate)
             break
@@ -374,11 +530,13 @@ module EasyBoxPacker
     end
 
     # pack_options: split_strategies:, greedy_fallback: and optionally weight_limit:
-    def fits_in_one?(dimensions, items, pack_options = {})
+    # With a deadline, false also when the pack did not finish in time.
+    def fits_in_one?(dimensions, items, pack_options = {}, deadline = nil)
       options = pack_options.dup
       container = { dimensions: dimensions, weight_limit: options.delete(:weight_limit) }
-      packing = pack(container: container, items: items, **options)
-      packing[:packings].size == 1 && packing[:errors].empty?
+      packing = pack_until(container, items, options.fetch(:split_strategies, SPLIT_STRATEGIES),
+                           options.fetch(:greedy_fallback, true), deadline)
+      !packing.nil? && packing[:packings].size == 1 && packing[:errors].empty?
     end
 
     # result is a #pack result whose first packing is the one used for this box
@@ -437,12 +595,14 @@ module EasyBoxPacker
     end
 
 
-    def pack_with_strategy(container_dimensions, items, weight_limit, strategy)
+    # Returns nil when the deadline passes before every item was handled.
+    def pack_with_strategy(container_dimensions, items, weight_limit, strategy, deadline = nil)
       packings = []
       errors   = []
 
       # pack from biggest to smallest
       items.sort_by { |h| valid_dimensions?(h[:dimensions]) ? h[:dimensions].sort.reverse : [] }.reverse.each do |item|
+        return nil if out_of_time?(deadline)
         unless valid_dimensions?(item[:dimensions])
           errors << "Item: #{item} has invalid dimensions"
           next

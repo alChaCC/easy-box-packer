@@ -2,7 +2,7 @@
 
 Gem::Specification.new do |s|
   s.name         = 'easy-box-packer'
-  s.version      = '0.4.0'
+  s.version      = '0.5.0'
   s.author       = 'Aloha Chen'
   s.email        = 'y.alohac@gmail.com'
   s.homepage     = 'https://github.com/alChaCC/easy-box-packer'
