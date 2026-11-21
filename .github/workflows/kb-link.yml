@@ -1,0 +1,29 @@
+name: KB link
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  kb-link:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip for pull requests from forks
+        if: github.event.pull_request.head.repo.fork == true
+        run: echo "::notice::PR from a fork; the maintainer adds the KB line before merging."
+      - name: PR body has a KB line
+        if: github.event.pull_request.head.repo.fork != true
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s\n' "$PR_BODY" | tr -d '\r' | grep -Eq '^[[:space:]]*KB:[[:space:]]*([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[0-9]+|https?://[^[:space:]]+|n/a[[:space:]]*\([^)]*[^[:space:])][^)]*\))'; then
+            echo "KB line found."
+            exit 0
+          fi
+          echo "::error title=Missing KB line::The PR body needs a line like one of these:"
+          echo "::error::KB: <owner>/<repo>#<number>  or  KB: <URL>   (the docs PR for this change)"
+          echo "::error::KB: n/a (<reason>)                          (e.g. KB: n/a (CI-only change))"
+          echo "Edit the PR description; this check re-runs on edit."
+          exit 1

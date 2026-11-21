@@ -5,14 +5,13 @@ Ruby gem, a 3D bin-packing engine. One file, `easy-box-packer.rb`, with specs in
 
 ## Before any task: read the knowledge base
 
-The project knowledge base is [alChaCC/easy-box-packer-kb](https://github.com/alChaCC/easy-box-packer-kb):
-read its README.md, dependencies.md and projects/easy-box-packer.md first.
-After any change, open or update a KB PR (see its CONTRIBUTING.md) and write
-`KB: alChaCC/easy-box-packer-kb#N` (or `KB: n/a (reason)`) in the code PR body.
-Write to the KB only from your own git worktree of it, never in someone else's checkout.
-Changing anything the API relies on (public methods, options, result shapes, `unpacked`
-reasons)? Run the full-system e2e in [alChaCC/easy-box-packer-qa](https://github.com/alChaCC/easy-box-packer-qa)
-(`bin/system-e2e` with this branch) before merging.
+Maintainers keep a private knowledge base for this project (maintainers only). Read it
+before a task: its overview, the dependency map and the page for this gem. After any
+change, open or update a KB PR and put a `KB: <link>` line (or `KB: n/a (reason)`) in
+the code PR body; the KB link check requires it, except for PRs from forks. Write to the
+KB only from your own git worktree of it, never in someone else's checkout.
+Changing anything downstream users rely on (public methods, options, result shapes,
+`unpacked` reasons)? Run the maintainers' full-system e2e with this branch before merging.
 
 ## Boundaries
 
