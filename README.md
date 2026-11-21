@@ -77,7 +77,7 @@ It works in two steps:
 ```ruby
 EasyBoxPacker.find_smallest_container(
   items: items,
-  time_limit: 0.5,              # seconds (default 0.5). nil = no limit, 0 = step 1 only
+  time_limit: 0.5,              # seconds (default 0.5). nil = no limit, 0 = step 1 only (not bounded)
   max_attempts: nil,            # max candidates test-packed; same result on every machine
   max_length: 120,              # longest side allowed (cm), e.g. your carrier's limit
   max_length_plus_girth: 300,   # length + 2 * (width + height) allowed (cm)
@@ -85,8 +85,10 @@ EasyBoxPacker.find_smallest_container(
 )
 ```
 
-`time_limit` is a soft limit for the whole call: step 1 always finishes, and
-the test pack already running when the time runs out also finishes.
+`time_limit` bounds the whole call (since 0.5.0): when it runs out during step 1, the
+answer is the stacked "greedy" container (or, with upright / fragile items, all items
+side by side), which always holds every item; the test pack running at that moment is
+abandoned. `time_limit: 0` keeps the 0.1.0 behaviour: step 1 only, run to the end.
 
 By default the cheapest container is the one with the smallest volume, then the
 smallest length + girth. Carriers charge on dimensional weight (volume) plus
@@ -131,10 +133,22 @@ fills the box that packs the most item volume per cost and repeats.
 | `padding` | `0` | cm of cushioning kept free on every side (a box's own `:padding` wins) |
 | `cost` | `box[:cost]` or volume | lambda `box -> number`, lower is better |
 | `max_items` | `nil` | raise `ArgumentError` when more items are given |
-| `time_limit` | `nil` | soft limit in seconds; after it only the fastest strategy is used |
+| `time_limit` | `nil` | seconds for the whole call, see below. `nil` = no limit |
 | `split_strategies`, `greedy_fallback` | | passed to `pack` |
 
 `unpacked` reasons: `:invalid_dimensions`, `:too_big`, `:too_heavy`, `:no_single_box`.
+
+`time_limit` (since 0.5.0) is an upper bound, not a hint. When it is set, each round
+first makes a cheap answer: the box with the lowest estimated cost for the remaining
+items, filled with the first split strategy in as many copies as needed. When the time
+runs out, the work in progress is abandoned and the cheaper of that answer and any box
+already packed in time is returned. So a call takes about `time_limit`; it can only go
+over by one first-strategy pack of the remaining items, and only when that pack alone
+is slower than the limit. The result is always valid: every item is placed (inside its
+box, no overlaps, constraints and weight limits kept) or in `unpacked` with one of the
+reasons above, as without a limit. Running out of time can cost more boxes or a higher
+total cost than the full search would find; with a generous limit the answer is the
+same as with `nil`.
 
 Each box in the result also has `container_dimensions` (the frame the positions are in,
 the third axis is up) and every placement has `step:` and `support:`, see below.
@@ -186,6 +200,17 @@ bundle exec rspec easy-box-packer_spec.rb
 ```
 
 ## Changelog
+
+### 0.5.0
+
+- `time_limit` is an upper bound for `select_box` and `find_smallest_container`
+  (before, both could run several times over it: 2-4 s for 200 items with 0.5).
+  Results stay valid and every item is still placed or reported; see the
+  `select_box` and `find_smallest_container` sections. `nil` is still no limit,
+  `time_limit: 0` for `find_smallest_container` still means step 1 only.
+- Without a limit, or with a generous one, answers are unchanged.
+- `select_box` checks which boxes each item fits faster.
+- CI: specs on Ruby 2.7 and 3.4 (GitHub Actions).
 
 ### 0.4.0
 
