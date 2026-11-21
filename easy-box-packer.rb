@@ -303,11 +303,12 @@ module EasyBoxPacker
     end
 
     # A cheap, valid answer for the remaining items, used by select_box when time
-    # runs out: { boxes:, unpacked: }. Repeatedly take the box most of the remaining
-    # items fit in on their own, then the lowest estimated cost (copies needed by
-    # volume and by weight, times its cost), and pack those items into as many
-    # copies of it as needed with one split strategy: one pack per box type used,
-    # usually only one. Every item fits its box alone, so each pass places items;
+    # runs out: { boxes:, unpacked: }. Like the full search it prefers one box: it
+    # repeatedly takes the box most of the remaining items fit in on their own, then
+    # one estimated to hold them all in a single copy (cheapest first), else the
+    # lowest estimated cost (copies needed by volume and by weight, times its cost),
+    # and packs those items into as many copies of it as needed with one split
+    # strategy: one pack per box type used, usually only one. Every item fits its box alone, so each pass places items;
     # if a pass placed none, each gets a copy of its own. Without
     # allow_multiple_boxes there is one pass, into the cheapest box estimated to
     # hold everything (else the largest): one box, or every item :no_single_box.
@@ -319,8 +320,9 @@ module EasyBoxPacker
           c = candidates[i]
           group = remaining.select { |item| fits[item].include?(i) }
           copies = estimated_copies(c[:container], group)
-          rank = allow_multiple_boxes ? [c[:cost] * copies, -volume(c[:container][:dimensions])] : [copies == 1 ? c[:cost] : Float::INFINITY, -volume(c[:container][:dimensions])]
-          [-group.size, *rank]
+          single = copies == 1 ? 0 : 1
+          rank = allow_multiple_boxes ? [single, c[:cost] * copies] : [single, single.zero? ? c[:cost] : 0]
+          [-group.size, *rank, -volume(c[:container][:dimensions])]
         end
         cand = candidates[k]
         group = remaining.select { |item| fits[item].include?(k) }
@@ -359,15 +361,16 @@ module EasyBoxPacker
       [by_volume.ceil, by_weight.ceil, 1].max
     end
 
-    # The cheaper of the plan and the packs (from a round cut short by the deadline)
+    # The better of the plan and the packs (from a round cut short by the deadline)
     # that hold every remaining item, in as many copies of their box as they need.
+    # Better, as in the full search: nothing unpacked, then one box, then cheaper.
     def cheapest_plan(plan, results, allow_multiple_boxes)
+      rank = ->(p) { [p[:unpacked].empty? ? 0 : 1, p[:boxes].size == 1 ? 0 : 1, p[:boxes].sum { |b| b[:cost] }] }
       results.each do |cand, result|
         next unless result[:errors].empty?
         next if !allow_multiple_boxes && result[:packings].size > 1
-        cost = cand[:cost] * result[:packings].size
-        next if plan[:unpacked].empty? && cost >= plan[:boxes].sum { |b| b[:cost] }
-        plan = { boxes: result[:packings].map { |pk| box_result(cand, result.merge(packings: [pk])) }, unpacked: [] }
+        other = { boxes: result[:packings].map { |pk| box_result(cand, result.merge(packings: [pk])) }, unpacked: [] }
+        plan = other if (rank.call(other) <=> rank.call(plan)) < 0
       end
       plan
     end

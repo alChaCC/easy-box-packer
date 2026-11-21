@@ -781,6 +781,15 @@ describe 'time_limit is an upper bound' do
     expect(constraint_problems(result)).to eql([])
   end
 
+  it 'select_box out of time still uses one box when one box holds everything' do
+    items = random_items(50, Random.new(7))
+    full  = EasyBoxPacker.select_box(boxes: boxes, items: items, time_limit: nil)
+    quick = EasyBoxPacker.select_box(boxes: boxes, items: items, time_limit: 0)
+    expect(full[:boxes].size).to eql(1)
+    expect(quick[:boxes].size).to eql(1)
+    expect(constraint_problems(quick)).to eql([])
+  end
+
   it 'select_box out of time puts items that need different boxes in different boxes' do
     big   = { id: 'big', dimensions: [75, 55, 45], weight: 1 }
     small = Array.new(30) { |i| { id: i, dimensions: [8, 8, 8], weight: 0.2 } }
