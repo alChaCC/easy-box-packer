@@ -139,10 +139,11 @@ fills the box that packs the most item volume per cost and repeats.
 `unpacked` reasons: `:invalid_dimensions`, `:too_big`, `:too_heavy`, `:no_single_box`.
 
 `time_limit` (since 0.5.0) is an upper bound, not a hint. When it is set, each round
-first makes a cheap answer: the box with the lowest estimated cost for the remaining
-items, filled with the first split strategy in as many copies as needed. When the time
-runs out, the work in progress is abandoned and the cheaper of that answer and any box
-already packed in time is returned. So a call takes about `time_limit`; it can only go
+first makes a cheap answer: one box estimated to hold all remaining items (the cheapest
+such box), or else the box with the lowest estimated cost, filled with the first split
+strategy in as many copies as needed. When the time runs out, the work in progress is
+abandoned and the better of that answer and any box already packed in time is returned,
+ranked as the full search ranks them: one box before several, then lower cost. So a call takes about `time_limit`; it can only go
 over by one first-strategy pack of the remaining items, and only when that pack alone
 is slower than the limit. The result is always valid: every item is placed (inside its
 box, no overlaps, constraints and weight limits kept) or in `unpacked` with one of the
